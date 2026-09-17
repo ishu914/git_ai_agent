@@ -9,13 +9,19 @@ client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def clear_event_states():
+def isolate_webhook_environment(monkeypatch, tmp_path):
+    empty_env_file = tmp_path / "empty.env"
+    empty_env_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV_FILE", str(empty_env_file))
+    monkeypatch.delenv("GITLAB_WEBHOOK_SIGNING_TOKEN", raising=False)
+    monkeypatch.delenv("GITLAB_WEBHOOK_SECRET", raising=False)
     mr_processor.EVENT_STATES.clear()
     yield
     mr_processor.EVENT_STATES.clear()
 
 
 def test_missing_webhook_token(monkeypatch):
+    monkeypatch.delenv("GITLAB_WEBHOOK_SIGNING_TOKEN", raising=False)
     monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "supersecret")
     response = client.post(
         "/webhook/gitlab",
@@ -25,6 +31,7 @@ def test_missing_webhook_token(monkeypatch):
 
 
 def test_incorrect_webhook_token(monkeypatch):
+    monkeypatch.delenv("GITLAB_WEBHOOK_SIGNING_TOKEN", raising=False)
     monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "supersecret")
     response = client.post(
         "/webhook/gitlab",
@@ -35,6 +42,7 @@ def test_incorrect_webhook_token(monkeypatch):
 
 
 def test_missing_server_webhook_secret(monkeypatch):
+    monkeypatch.delenv("GITLAB_WEBHOOK_SIGNING_TOKEN", raising=False)
     monkeypatch.delenv("GITLAB_WEBHOOK_SECRET", raising=False)
     response = client.post(
         "/webhook/gitlab",

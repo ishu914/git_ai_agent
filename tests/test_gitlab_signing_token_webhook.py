@@ -13,6 +13,15 @@ from app.services import mr_processor
 client = TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def isolate_webhook_environment(monkeypatch, tmp_path):
+    empty_env_file = tmp_path / "empty.env"
+    empty_env_file.write_text("", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV_FILE", str(empty_env_file))
+    monkeypatch.delenv("GITLAB_WEBHOOK_SIGNING_TOKEN", raising=False)
+    monkeypatch.delenv("GITLAB_WEBHOOK_SECRET", raising=False)
+
+
 def _make_signature(signing_token: str, webhook_id: str, timestamp: str, raw_body: bytes) -> str:
     if not signing_token.startswith("whsec_"):
         raise ValueError("Signing token must start with whsec_")
@@ -335,8 +344,8 @@ def test_background_failure_after_valid_signature_is_logged(monkeypatch):
 
 
 def test_legacy_x_gitlab_token_fallback(monkeypatch):
-    monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "legacy-secret")
     monkeypatch.delenv("GITLAB_WEBHOOK_SIGNING_TOKEN", raising=False)
+    monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "legacy-secret")
     raw_body = b'{"object_kind":"merge_request","object_attributes":{"iid":12,"action":"open"},"project":{"id":1}}'
     response = client.post(
         "/webhook/gitlab",

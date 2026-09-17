@@ -1,6 +1,5 @@
-import asyncio
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from app.ai.client import OpenRouterClient
 from app.ai.code_reviewer import review_merge_request
@@ -10,7 +9,27 @@ from app.gitlab.client import GitLabClient
 from app.validation.engine import ValidationEngine
 
 logger = logging.getLogger(__name__)
-PROCESSED_EVENTS: Dict[str, str] = {}
+EVENT_STATES: Dict[str, str] = {}
+
+
+def mark_event_pending(event_key: str) -> None:
+    EVENT_STATES[event_key] = "pending"
+
+
+def mark_event_processing(event_key: str) -> None:
+    EVENT_STATES[event_key] = "processing"
+
+
+def mark_event_completed(event_key: str) -> None:
+    EVENT_STATES[event_key] = "completed"
+
+
+def mark_event_failed(event_key: str) -> None:
+    EVENT_STATES[event_key] = "failed"
+
+
+def should_skip_duplicate(event_key: str) -> bool:
+    return EVENT_STATES.get(event_key) in {"pending", "processing"}
 
 
 def build_mr_context(project_id: str, mr_iid: int, client: GitLabClient) -> Dict[str, Any]:
@@ -57,6 +76,13 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
     if not project_id or not mr_iid:
         raise ValueError("GitLab event is missing project ID or MR IID")
 
+    dedupe_key = f"{project_id}:{mr_iid}:{action}"
+    if should_skip_duplicate(dedupe_key):
+        logger.info("MR processing already queued for %s", dedupe_key)
+        return {"status": "duplicate", "project_id": project_id, "mr_iid": mr_iid}
+
+    mark_event_processing(dedupe_key)
+
     settings = get_settings()
     client = GitLabClient(base_url=settings.gitlab_url, token=settings.gitlab_token)
     context = build_mr_context(project_id, mr_iid, client)
@@ -72,11 +98,10 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
 
     if ai_summary:
         description = context["merge_request"].get("description") or ""
-        updated_description = description
         if "<!-- AI_REVIEW_START -->" not in description:
             updated_description = f"{description}\n\n{ai_summary}" if description.strip() else ai_summary
-        client.update_merge_request_description(project_id, mr_iid, updated_description)
-        logger.info("MR description updated for %s !%s", project_id, mr_iid)
+            client.update_merge_request_description(project_id, mr_iid, updated_description)
+            logger.info("MR description updated for %s !%s", project_id, mr_iid)
 
     status = {
         "project_id": project_id,
@@ -86,18 +111,5 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
         "summary": ai_summary,
         "review": ai_review,
     }
+    mark_event_completed(dedupe_key)
     return status
-
-
-def is_duplicate(event_key: str) -> bool:
-    global PROCESSED_EVENTS
-    return event_key in PROCESSED_EVENTS
-
-
-def mark_processed(event_key: str) -> None:
-    global PROCESSED_EVENTS
-    PROCESSED_EVENTS[event_key] = "processed"
-
-
-process_gitlab_event.is_duplicate = is_duplicate
-process_gitlab_event.mark_processed = mark_processed

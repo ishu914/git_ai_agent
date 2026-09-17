@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -7,6 +8,48 @@ import httpx
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+
+class OpenRouterAPIError(RuntimeError):
+    """Raised when OpenRouter rejects an API request."""
+
+
+class OpenRouterResponseError(ValueError):
+    """Raised when OpenRouter returns an unusable completion response."""
+
+
+class OpenRouterEmptyContentError(OpenRouterResponseError):
+    """Raised when a completion has no message content."""
+
+
+class OpenRouterMalformedJSONError(OpenRouterResponseError):
+    """Raised when completion content is not valid JSON."""
+
+
+class OpenRouterIncompleteResponseError(OpenRouterResponseError):
+    """Raised when the model stopped before producing a complete response."""
+
+
+def parse_json_content(content: Any) -> Dict[str, Any]:
+    """Parse structured completion content without reconstructing malformed output."""
+    if isinstance(content, dict):
+        return content
+    if not isinstance(content, str) or not content.strip():
+        raise OpenRouterEmptyContentError("OpenRouter returned an empty content payload.")
+
+    text = content.strip()
+    fence_match = re.fullmatch(r"```(?:json)?\s*\n?(.*?)\n?```", text, flags=re.DOTALL | re.IGNORECASE)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise OpenRouterMalformedJSONError("OpenRouter returned malformed JSON content for the request.") from exc
+
+    if not isinstance(parsed, dict):
+        raise OpenRouterMalformedJSONError("OpenRouter returned JSON that was not an object.")
+    return parsed
 
 
 class OpenRouterClient:
@@ -96,36 +139,95 @@ class OpenRouterClient:
             raise last_error
         raise RuntimeError("OpenRouter request failed without an error detail.")
 
+    def _safe_error_message(self, response: httpx.Response) -> str:
+        try:
+            body = response.json()
+        except ValueError:
+            return "unparseable_error_response"
+        if isinstance(body, dict):
+            error = body.get("error")
+            if isinstance(error, dict):
+                message = error.get("message")
+                if isinstance(message, str):
+                    return message[:200]
+            if isinstance(error, str):
+                return error[:200]
+        return "openrouter_request_rejected"
+
     def chat_completion(self, messages: List[Dict[str, Any]], temperature: float = 0.2, max_tokens: Optional[int] = None) -> Dict[str, Any]:
         payload = self.build_chat_payload(messages=messages, temperature=temperature, max_tokens=max_tokens)
         response = self._request("POST", "/chat/completions", payload)
 
+        if response.status_code in {400, 422} and "response_format" in payload:
+            logger.warning(
+                "OpenRouter model rejected structured output; retrying without response_format: status=%s model=%s message=%s",
+                response.status_code,
+                self.model,
+                self._safe_error_message(response),
+            )
+            fallback_payload = dict(payload)
+            fallback_payload.pop("response_format", None)
+            response = self._request("POST", "/chat/completions", fallback_payload)
+
         if response.status_code >= 400:
-            logger.error("OpenRouter API error: %s - %s", response.status_code, response.text[:500])
-            raise RuntimeError(f"OpenRouter API request failed with status {response.status_code}: {response.text[:500]}")
+            error_message = self._safe_error_message(response)
+            logger.error(
+                "OpenRouter API error: status=%s model=%s message=%s",
+                response.status_code,
+                self.model,
+                error_message,
+            )
+            raise OpenRouterAPIError(f"OpenRouter API request failed with status {response.status_code}: {error_message}")
 
         try:
             content = response.json()
         except ValueError as exc:
-            raise ValueError("OpenRouter response was not valid JSON") from exc
+            logger.warning("OpenRouter response envelope was not JSON: model=%s status=%s", self.model, response.status_code)
+            raise OpenRouterResponseError("OpenRouter response was not valid JSON") from exc
 
-        if "choices" not in content or not content["choices"]:
-            raise ValueError("OpenRouter response did not include any choices.")
+        choices = content.get("choices") if isinstance(content, dict) else None
+        if not choices:
+            raise OpenRouterResponseError("OpenRouter response did not include any choices.")
 
-        message = content["choices"][0].get("message", {})
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            raise OpenRouterResponseError("OpenRouter response choice was not an object.")
+        finish_reason = choice.get("finish_reason")
+        if finish_reason in {"length", "max_tokens", "content_filter"}:
+            logger.warning(
+                "OpenRouter returned an incomplete response: model=%s status=%s finish_reason=%s",
+                self.model,
+                response.status_code,
+                finish_reason,
+            )
+            raise OpenRouterIncompleteResponseError(
+                f"OpenRouter response was incomplete (finish_reason={finish_reason})."
+            )
+
+        message = choice.get("message")
         if not message:
             raise ValueError("OpenRouter response did not include a message payload.")
 
         raw_text = message.get("content")
         if not raw_text:
-            raise ValueError("OpenRouter returned an empty content payload.")
+            logger.warning(
+                "OpenRouter returned empty content: model=%s status=%s finish_reason=%s",
+                self.model,
+                response.status_code,
+                finish_reason,
+            )
+            raise OpenRouterEmptyContentError("OpenRouter returned an empty content payload.")
 
         try:
-            if isinstance(raw_text, str):
-                return json.loads(raw_text)
-            return raw_text
-        except json.JSONDecodeError as exc:
-            raise ValueError("OpenRouter returned malformed JSON content for the request.") from exc
+            return parse_json_content(raw_text)
+        except OpenRouterResponseError:
+            logger.warning(
+                "OpenRouter returned unusable structured content: model=%s status=%s finish_reason=%s",
+                self.model,
+                response.status_code,
+                finish_reason,
+            )
+            raise
 
     def health_check(self) -> Dict[str, Any]:
         """Lightweight connectivity test without exposing secrets."""

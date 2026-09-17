@@ -25,7 +25,7 @@ def review_merge_request(ai_client: OpenRouterClient, mr_context: Dict[str, Any]
         result = ai_client.chat_completion(messages=messages, temperature=0.1, max_tokens=800)
         if isinstance(result, dict):
             return result
-        return {"status": "pass", "summary": "No review result returned.", "findings": []}
+        return {"status": "unavailable", "summary": "AI review could not be completed.", "findings": []}
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Code review generation failed: %s", exc)
-        return {"status": "pass", "summary": "AI review unavailable; review not completed.", "findings": []}
+        return {"status": "unavailable", "summary": "AI review could not be completed.", "findings": []}

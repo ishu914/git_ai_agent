@@ -1,5 +1,9 @@
+import base64
+import binascii
+import hashlib
 import hmac
 import logging
+import time
 from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
@@ -14,6 +18,61 @@ from app.services.mr_processor import (
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def verify_gitlab_webhook_signature(
+    signing_token: str,
+    webhook_id: str,
+    webhook_timestamp: str,
+    raw_body: bytes,
+    received_signature: str,
+) -> bool:
+    """Verify GitLab's Standard Webhooks signing-token signature.
+
+    GitLab signs: {webhook-id}.{webhook-timestamp}.{raw-body}
+    using the decoded whsec_ signing token and HMAC-SHA256.
+    """
+    if not signing_token:
+        raise ValueError("Missing signing token")
+    if not webhook_id:
+        raise ValueError("Missing webhook-id")
+    if not webhook_timestamp:
+        raise ValueError("Missing webhook-timestamp")
+    if not received_signature:
+        raise ValueError("Missing webhook-signature")
+
+    if not signing_token.startswith("whsec_"):
+        raise ValueError("Malformed GitLab signing token")
+
+    token = signing_token[6:]
+    try:
+        signing_key = base64.b64decode(token, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("Invalid GitLab signing token base64") from exc
+
+    payload = f"{webhook_id}.{webhook_timestamp}.".encode("utf-8") + raw_body
+    digest = hmac.new(signing_key, payload, hashlib.sha256).digest()
+    expected_signature = f"v1,{base64.b64encode(digest).decode('ascii')}"
+
+    candidates = received_signature.split()
+    for candidate in candidates:
+        if not candidate.startswith("v1,"):
+            continue
+        if hmac.compare_digest(candidate, expected_signature):
+            return True
+    return False
+
+
+def verify_gitlab_webhook_timestamp(webhook_timestamp: str, tolerance_seconds: int) -> bool:
+    if not webhook_timestamp:
+        return False
+    try:
+        timestamp_value = int(webhook_timestamp)
+    except (TypeError, ValueError):
+        return False
+
+    current_time = int(time.time())
+    return abs(current_time - timestamp_value) <= tolerance_seconds
 
 
 def _extract_mr_event_metadata(event_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -55,15 +114,43 @@ async def _run_background_processing(event_data: Dict[str, Any], dedupe_key: str
 @router.post("/webhook/gitlab")
 async def gitlab_webhook(request: Request, background_tasks: BackgroundTasks) -> Dict[str, Any]:
     settings = get_settings()
-    event_token = request.headers.get("X-Gitlab-Token")
-    if event_token is None:
-        raise HTTPException(status_code=401, detail="Missing GitLab webhook token")
+    raw_body = await request.body()
 
-    secret = settings.gitlab_webhook_secret or ""
-    if not secret:
-        raise HTTPException(status_code=500, detail="GitLab webhook secret is not configured")
-    if not hmac.compare_digest(event_token, secret):
-        raise HTTPException(status_code=401, detail="Invalid GitLab webhook token")
+    webhook_id = request.headers.get("webhook-id")
+    webhook_timestamp = request.headers.get("webhook-timestamp")
+    received_signature = request.headers.get("webhook-signature")
+
+    if settings.gitlab_webhook_signing_token:
+        if not webhook_id:
+            raise HTTPException(status_code=401, detail="Missing webhook-id")
+        if not webhook_timestamp:
+            raise HTTPException(status_code=401, detail="Missing webhook-timestamp")
+        if not received_signature:
+            raise HTTPException(status_code=401, detail="Missing webhook-signature")
+        if not verify_gitlab_webhook_timestamp(webhook_timestamp, settings.gitlab_webhook_timestamp_tolerance_seconds):
+            raise HTTPException(status_code=401, detail="Invalid or expired webhook timestamp")
+        try:
+            verified = verify_gitlab_webhook_signature(
+                settings.gitlab_webhook_signing_token,
+                webhook_id,
+                webhook_timestamp,
+                raw_body,
+                received_signature,
+            )
+        except ValueError as exc:
+            logger.warning("GitLab webhook signing verification rejected a malformed request")
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        if not verified:
+            raise HTTPException(status_code=401, detail="Invalid GitLab webhook signature")
+    else:
+        legacy_token = request.headers.get("X-Gitlab-Token")
+        if legacy_token is None:
+            raise HTTPException(status_code=401, detail="Missing GitLab webhook token")
+        secret = settings.gitlab_webhook_secret or ""
+        if not secret:
+            raise HTTPException(status_code=500, detail="GitLab webhook secret is not configured")
+        if not hmac.compare_digest(legacy_token, secret):
+            raise HTTPException(status_code=401, detail="Invalid GitLab webhook token")
 
     try:
         event_data = await request.json()
@@ -71,7 +158,7 @@ async def gitlab_webhook(request: Request, background_tasks: BackgroundTasks) ->
         logger.warning("Malformed GitLab webhook payload received")
         raise HTTPException(status_code=400, detail="Malformed JSON payload") from exc
 
-    event_name = request.headers.get("X-Gitlab-Event") or "unknown"
+    event_name = request.headers.get("X-Gitlab-Event") or "Merge Request Hook"
     try:
         mr_event = _extract_mr_event_metadata(event_data)
     except ValueError as exc:
@@ -80,7 +167,11 @@ async def gitlab_webhook(request: Request, background_tasks: BackgroundTasks) ->
 
     project_id = mr_event["project_id"]
     mr_iid = mr_event["mr_iid"]
-    dedupe_key = request.headers.get("X-Gitlab-Event-UUID") or f"{project_id}:{mr_iid}:{mr_event['action']}"
+    dedupe_key = (
+        request.headers.get("webhook-id")
+        or request.headers.get("X-Gitlab-Event-UUID")
+        or f"{project_id}:{mr_iid}:{mr_event['action']}"
+    )
 
     if should_skip_duplicate(dedupe_key):
         logger.info("GitLab MR event is already queued or processing: %s", dedupe_key)

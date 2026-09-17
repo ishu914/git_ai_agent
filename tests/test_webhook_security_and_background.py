@@ -1,10 +1,18 @@
 from fastapi.testclient import TestClient
+import pytest
 
 from app.main import app
 from app.services import mr_processor
 
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def clear_event_states():
+    mr_processor.EVENT_STATES.clear()
+    yield
+    mr_processor.EVENT_STATES.clear()
 
 
 def test_missing_webhook_token(monkeypatch):

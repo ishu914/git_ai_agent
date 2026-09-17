@@ -77,10 +77,6 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("GitLab event is missing project ID or MR IID")
 
     dedupe_key = f"{project_id}:{mr_iid}:{action}"
-    if should_skip_duplicate(dedupe_key):
-        logger.info("MR processing already queued for %s", dedupe_key)
-        return {"status": "duplicate", "project_id": project_id, "mr_iid": mr_iid}
-
     mark_event_processing(dedupe_key)
 
     settings = get_settings()

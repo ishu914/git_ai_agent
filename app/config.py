@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     gitlab_url: str = Field(default="http://192.168.2.86", alias="GITLAB_URL")
     gitlab_token: Optional[str] = Field(default=None, alias="GITLAB_TOKEN")
     gitlab_webhook_secret: Optional[str] = Field(default=None, alias="GITLAB_WEBHOOK_SECRET")
+    gitlab_webhook_signing_token: Optional[str] = Field(default=None, alias="GITLAB_WEBHOOK_SIGNING_TOKEN")
+    gitlab_webhook_timestamp_tolerance_seconds: int = Field(default=300, alias="GITLAB_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS")
 
     openrouter_api_key: Optional[str] = Field(default=None, alias="OPENROUTER_API_KEY")
     openrouter_model: str = Field(default="openai/gpt-4o-mini", alias="OPENROUTER_MODEL")

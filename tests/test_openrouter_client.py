@@ -31,6 +31,10 @@ def test_client_builds_chat_payload():
     assert "response_format" in payload
 
 
-def test_client_raises_for_missing_api_key():
+def test_client_raises_for_missing_api_key(monkeypatch, tmp_path):
+    empty_env = tmp_path / ".env.empty"
+    empty_env.write_text("", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV_FILE", str(empty_env))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
         OpenRouterClient(api_key=None)

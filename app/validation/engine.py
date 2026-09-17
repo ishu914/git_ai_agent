@@ -13,7 +13,7 @@ class ValidationEngine:
             "max_diff_size": 100000,
             "max_additions": 500,
             "max_deletions": 500,
-            "sensitive_patterns": ["BEGIN PRIVATE KEY", "AKIA", "sk_live", "xoxb-", "password\s*="],
+            "sensitive_patterns": ["BEGIN PRIVATE KEY", "AKIA", "sk_live", "xoxb-", r"password\s*="],
             **(config or {}),
         }
 

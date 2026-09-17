@@ -1,7 +1,8 @@
+import os
 from typing import Optional
 
 from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict, DotEnvSettingsSource
 
 
 class Settings(BaseSettings):
@@ -24,6 +25,25 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls,
+        init_settings,
+        env_settings,
+        dotenv_settings,
+        file_secret_settings,
+    ):
+        env_file = os.getenv("APP_ENV_FILE")
+        if env_file:
+            return (
+                init_settings,
+                env_settings,
+                DotEnvSettingsSource(settings_cls, env_file=env_file),
+                file_secret_settings,
+            )
+        return init_settings, env_settings, dotenv_settings, file_secret_settings
 
 
 def get_settings() -> Settings:

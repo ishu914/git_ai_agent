@@ -3,7 +3,10 @@ import pytest
 from app.gitlab.client import GitLabClient
 
 
-def test_gitlab_client_requires_token(monkeypatch):
+def test_gitlab_client_requires_token(monkeypatch, tmp_path):
+    empty_env = tmp_path / ".env.empty"
+    empty_env.write_text("", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV_FILE", str(empty_env))
     monkeypatch.delenv("GITLAB_TOKEN", raising=False)
     with pytest.raises(ValueError, match="GITLAB_TOKEN"):
         GitLabClient(token=None)

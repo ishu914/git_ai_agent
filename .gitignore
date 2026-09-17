@@ -23,8 +23,3 @@ htmlcov/
 .DS_Store
 Thumbs.db
 .vscode/
-
-.env
-.venv/
-__pycache__/
-.pytest_cache/

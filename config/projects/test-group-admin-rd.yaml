@@ -1,0 +1,14 @@
+max_changed_files: 25
+allowed_extensions:
+  - .py
+  - .js
+  - .ts
+  - .json
+  - .yaml
+  - .yml
+  - .md
+blocked_files:
+  - .env
+  - .env.*
+  - "*.pem"
+  - "*.key"

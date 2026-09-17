@@ -1,0 +1,1 @@
+"""GitLab AI Agent package."""

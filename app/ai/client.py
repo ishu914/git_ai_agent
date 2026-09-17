@@ -205,8 +205,8 @@ class OpenRouterClient:
             )
 
         message = choice.get("message")
-        if not message:
-            raise ValueError("OpenRouter response did not include a message payload.")
+        if not isinstance(message, dict) or not message:
+            raise OpenRouterResponseError("OpenRouter response did not include a valid message payload.")
 
         raw_text = message.get("content")
         if not raw_text:

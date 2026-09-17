@@ -6,10 +6,12 @@ from app.ai.code_reviewer import review_merge_request
 from app.ai.mr_summary import generate_mr_summary
 from app.config import get_settings
 from app.gitlab.client import GitLabClient
+from app.services.description_manager import replace_ai_section
 from app.validation.engine import ValidationEngine
 
 logger = logging.getLogger(__name__)
 EVENT_STATES: Dict[str, str] = {}
+AI_REVIEW_NOTE_MARKER = "<!-- AI_REVIEW_NOTE -->"
 
 
 def mark_event_pending(event_key: str) -> None:
@@ -66,6 +68,44 @@ def build_mr_context(project_id: str, mr_iid: int, client: GitLabClient) -> Dict
     }
 
 
+def _format_ai_review_note(review: Dict[str, Any]) -> str:
+    findings = review.get("findings") or []
+    lines = [AI_REVIEW_NOTE_MARKER, "## AI Code Review", "", str(review.get("summary", "")).strip()]
+    if findings:
+        lines.extend(["", "### Findings"])
+        for finding in findings:
+            if isinstance(finding, dict):
+                severity = str(finding.get("severity") or "unspecified").strip()
+                file_name = str(finding.get("file") or finding.get("path") or "unknown").strip()
+                detail = str(finding.get("message") or finding.get("description") or finding).strip()
+                lines.append(f"- **{severity}** `{file_name}`: {detail}")
+            else:
+                lines.append(f"- {str(finding).strip()}")
+    lines.append("")
+    lines.append(AI_REVIEW_NOTE_MARKER)
+    return "\n".join(lines)
+
+
+def _publish_ai_review(client: GitLabClient, project_id: str, mr_iid: int, review: Dict[str, Any]) -> None:
+    if review.get("status") == "unavailable":
+        logger.warning("AI code review unavailable; no GitLab note created for %s/%s", project_id, mr_iid)
+        return
+
+    body = _format_ai_review_note(review)
+    existing_notes = client.get_merge_request_notes(project_id, mr_iid)
+    existing_note = next(
+        (note for note in existing_notes if AI_REVIEW_NOTE_MARKER in str(note.get("body", ""))),
+        None,
+    )
+    if existing_note and existing_note.get("id") is not None:
+        client.update_merge_request_note(project_id, mr_iid, int(existing_note["id"]), body)
+        logger.info("AI review note updated for %s !%s", project_id, mr_iid)
+        return
+
+    client.create_merge_request_note(project_id, mr_iid, body)
+    logger.info("AI review note created for %s !%s", project_id, mr_iid)
+
+
 async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
     project_data = event_data.get("project", {})
     project_id = str(project_data.get("id") or event_data.get("project_id") or project_data.get("path_with_namespace") or "")
@@ -94,10 +134,12 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
 
     if ai_summary:
         description = context["merge_request"].get("description") or ""
-        if "<!-- AI_REVIEW_START -->" not in description:
-            updated_description = f"{description}\n\n{ai_summary}" if description.strip() else ai_summary
+        updated_description = replace_ai_section(description, ai_summary)
+        if updated_description != description:
             client.update_merge_request_description(project_id, mr_iid, updated_description)
             logger.info("MR description updated for %s !%s", project_id, mr_iid)
+
+    _publish_ai_review(client, project_id, mr_iid, ai_review)
 
     status = {
         "project_id": project_id,
@@ -105,6 +147,7 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
         "action": action,
         "validation": validation,
         "summary": ai_summary,
+        "summary_status": "available" if ai_summary else "unavailable",
         "review": ai_review,
     }
     mark_event_completed(dedupe_key)

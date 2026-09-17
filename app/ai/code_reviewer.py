@@ -16,15 +16,24 @@ def review_merge_request(ai_client: OpenRouterClient, mr_context: Dict[str, Any]
         "title": mr.get("title", ""),
         "source_branch": mr.get("source_branch", ""),
         "target_branch": mr.get("target_branch", ""),
-        "diff": diff_preview,
-        "focus": "Review for bugs, security, auth, secrets, performance, error handling, maintainability, tests, and dangerous changes. Return valid JSON only.",
+        "diff": diff_preview[:6000],
+        "instruction": "Return compact JSON: status, summary, findings. Findings must be a short list of concrete issues with severity and file.",
     }
 
     messages = build_messages_for_review("code-review", str(prompt))
     try:
         result = ai_client.chat_completion(messages=messages, temperature=0.1, max_tokens=800)
-        if isinstance(result, dict):
-            return result
+        if isinstance(result, dict) and result.get("summary"):
+            findings = result.get("findings", [])
+            if isinstance(findings, dict):
+                findings = [findings]
+            if not isinstance(findings, list):
+                findings = []
+            return {
+                "status": str(result.get("status") or "reviewed"),
+                "summary": str(result["summary"]).strip(),
+                "findings": findings,
+            }
         return {"status": "unavailable", "summary": "AI review could not be completed.", "findings": []}
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Code review generation failed: %s", exc)

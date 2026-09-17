@@ -5,17 +5,33 @@ AI_SECTION_START = "<!-- AI_REVIEW_START -->"
 AI_SECTION_END = "<!-- AI_REVIEW_END -->"
 
 
+def _as_text(value: Any, default: str = "") -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if value is None:
+        return default
+    return str(value).strip()
+
+
+def _as_text_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value.strip()] if value.strip() else []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
 def build_ai_section(data: Dict[str, Any]) -> str:
-    summary = str(data.get("summary", "")).strip()
-    change_type = ", ".join(data.get("change_type", []) or [])
-    testing = str(data.get("testing", "")).strip()
-    risk = str(data.get("risk", "low")).strip().lower()
-    files_summary = "\n".join(f"- {item}" for item in (data.get("files_summary") or []))
+    summary = _as_text(data.get("summary"), "AI summary unavailable.")
+    change_type = ", ".join(_as_text_list(data.get("change_type"))) or "Not specified"
+    testing = _as_text(data.get("testing"), "Not specified")
+    risk = _as_text(data.get("risk"), "Not specified").lower()
+    files_summary = "\n".join(f"- {item}" for item in _as_text_list(data.get("files_summary")))
 
     return (
         f"{AI_SECTION_START}\n"
         "## AI Generated Summary\n\n"
-        f"### Summary\n{summary or 'No summary provided.'}\n\n"
+        f"### Summary\n{summary}\n\n"
         f"### Change Type\n{change_type or 'Not specified'}\n\n"
         f"### Files Changed\n{files_summary or 'No file summary available.'}\n\n"
         f"### Testing\n{testing or 'Testing not specified.'}\n\n"

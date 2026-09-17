@@ -117,6 +117,19 @@ class GitLabClient:
             raise RuntimeError(f"GitLab note creation failed: {response.text[:500]}")
         return response.json()
 
+    def get_merge_request_notes(self, project_id: str, mr_iid: int) -> List[Dict[str, Any]]:
+        return self._get_json(f"/projects/{project_id}/merge_requests/{mr_iid}/notes", params={"per_page": 100})
+
+    def update_merge_request_note(self, project_id: str, mr_iid: int, note_id: int, body: str) -> Dict[str, Any]:
+        response = self._request(
+            "PUT",
+            f"/projects/{project_id}/merge_requests/{mr_iid}/notes/{note_id}",
+            json_body={"body": body},
+        )
+        if response.status_code >= 400:
+            raise RuntimeError(f"GitLab note update failed: {response.text[:500]}")
+        return response.json()
+
     def get_file_contents(self, project_id: str, file_path: str, ref: str = "HEAD") -> str:
         encoded_path = file_path.replace("/", "%2F")
         params = {"ref": ref}

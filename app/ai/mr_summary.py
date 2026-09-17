@@ -15,28 +15,25 @@ def generate_mr_summary(ai_client: OpenRouterClient, mr_context: Dict[str, Any])
     file_names = [item.get("new_path") or item.get("old_path") or "unknown" for item in changes]
 
     prompt = {
-        "summary": "Generate a structured summary for this GitLab merge request.",
-        "project": project.get("path_with_namespace", "unknown"),
         "title": mr.get("title", ""),
-        "description": mr.get("description", ""),
         "source_branch": mr.get("source_branch", ""),
         "target_branch": mr.get("target_branch", ""),
-        "file_count": len(file_names),
         "files": file_names[:20],
-        "diff_preview": "\n".join((entry.get("diff") or "")[:1200] for entry in changes[:10]),
+        "instruction": "Return JSON with summary, change_type, files_summary, testing, risk. Keep every value concise.",
     }
 
     messages = build_messages_for_review("mr-summary", str(prompt))
     try:
         result = ai_client.chat_completion(messages=messages, temperature=0.2, max_tokens=600)
-        if not isinstance(result, dict):
+        if not isinstance(result, dict) or not result.get("summary"):
+            logger.warning("MR summary generation unavailable: missing summary field")
             return ""
         ai_section = build_ai_section({
-            "summary": result.get("summary", "No summary generated."),
-            "change_type": result.get("change_type", []),
-            "testing": result.get("testing", "Testing not specified."),
-            "risk": result.get("risk", "low"),
-            "files_summary": result.get("files_summary", file_names[:10]),
+            "summary": result.get("summary"),
+            "change_type": result.get("change_type"),
+            "testing": result.get("testing"),
+            "risk": result.get("risk"),
+            "files_summary": result.get("files_summary"),
         })
         return ai_section
     except Exception as exc:  # pragma: no cover - defensive

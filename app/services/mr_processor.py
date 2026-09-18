@@ -1,12 +1,12 @@
 import logging
 from typing import Any, Dict, List
 
-from app.ai.client import OpenRouterClient
 from app.ai.code_reviewer import review_merge_request
 from app.ai.mr_summary import generate_mr_summary
+from app.ai.orchestrator import AIOrchestrator
 from app.config import get_settings
 from app.gitlab.client import GitLabClient
-from app.services.description_manager import replace_ai_section
+from app.services.description_manager import build_ai_unavailable_section, replace_ai_section
 from app.validation.engine import ValidationEngine
 
 logger = logging.getLogger(__name__)
@@ -128,16 +128,25 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
     if validation["status"] == "fail":
         logger.warning("Validation failed for project %s MR !%s", project_id, mr_iid)
 
-    ai_client = OpenRouterClient()
-    ai_summary = generate_mr_summary(ai_client, context)
-    ai_review = review_merge_request(ai_client, context)
+    summary_orchestrator = AIOrchestrator()
+    review_orchestrator = AIOrchestrator()
+    ai_summary = generate_mr_summary(summary_orchestrator, context)
+    ai_review = review_merge_request(review_orchestrator, context)
 
+    description = context["merge_request"].get("description") or ""
     if ai_summary:
-        description = context["merge_request"].get("description") or ""
-        updated_description = replace_ai_section(description, ai_summary)
-        if updated_description != description:
-            client.update_merge_request_description(project_id, mr_iid, updated_description)
-            logger.info("MR description updated for %s !%s", project_id, mr_iid)
+        description_content = ai_summary
+        if ai_review.get("status") == "unavailable":
+            description_content = ai_summary.replace(
+                "<!-- AI_REVIEW_END -->",
+                "\n### AI Review Status\nUnavailable. Human review is still required.\n<!-- AI_REVIEW_END -->",
+            )
+    else:
+        description_content = build_ai_unavailable_section(summary_orchestrator.last_failure_reason, validation)
+    updated_description = replace_ai_section(description, description_content)
+    if updated_description != description:
+        client.update_merge_request_description(project_id, mr_iid, updated_description)
+        logger.info("MR description updated for %s !%s", project_id, mr_iid)
 
     _publish_ai_review(client, project_id, mr_iid, ai_review)
 

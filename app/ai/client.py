@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from app.config import get_settings
+from app.ai.model_discovery import CACHE, candidates_from_catalog
+from app.ai.types import AIModelCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -239,3 +241,16 @@ class OpenRouterClient:
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("OpenRouter health check failed")
             return {"status": "error", "message": str(exc)}
+
+    def discover_models(self, ttl_seconds: int, free_only: bool = True) -> List[AIModelCandidate]:
+        return CACHE.get_or_fetch(
+            "openrouter-free" if free_only else "openrouter",
+            ttl_seconds,
+            lambda: self._discover_models(free_only),
+        )
+
+    def _discover_models(self, free_only: bool) -> List[AIModelCandidate]:
+        response = self._request("GET", "/models")
+        if response.status_code >= 400:
+            raise OpenRouterAPIError(f"OpenRouter model discovery failed with status {response.status_code}")
+        return candidates_from_catalog("openrouter", response.json(), free_only=free_only)

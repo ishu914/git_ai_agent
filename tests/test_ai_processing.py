@@ -1,8 +1,10 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
 from app.ai.mr_summary import generate_mr_summary
+from app.ai.types import AIUnavailableError
 from app.services import mr_processor
 from app.services.description_manager import build_ai_section
 
@@ -104,3 +106,59 @@ def test_unavailable_review_does_not_create_note():
     )
 
     mr_processor._publish_ai_review(client, "4", 2, {"status": "unavailable", "summary": "AI review could not be completed.", "findings": []})
+
+
+def test_processor_updates_unavailable_status_after_all_ai_failures(monkeypatch):
+    updates = []
+
+    class FakeGitLabClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_project(self, project_id):
+            return {"id": project_id, "path_with_namespace": "group/project"}
+
+        def get_merge_request(self, project_id, mr_iid):
+            return {"description": "Developer content"}
+
+        def get_merge_request_changes(self, project_id, mr_iid):
+            return {"changes": [{"new_path": "hello.py", "diff": "+print('hi')"}]}
+
+        def get_merge_request_commits(self, project_id, mr_iid):
+            return []
+
+        def get_merge_request_approvals(self, project_id, mr_iid):
+            return {}
+
+        def update_merge_request_description(self, project_id, mr_iid, description):
+            updates.append(description)
+            return {}
+
+        def get_merge_request_notes(self, project_id, mr_iid):
+            pytest.fail("unavailable AI must not query or create a review note")
+
+    class UnavailableOrchestrator:
+        last_failure_reason = "OpenRouter free-model quota exhausted."
+
+        def chat_completion(self, *args, **kwargs):
+            raise AIUnavailableError("all providers failed")
+
+    monkeypatch.setattr(mr_processor, "GitLabClient", FakeGitLabClient)
+    monkeypatch.setattr(mr_processor, "AIOrchestrator", UnavailableOrchestrator)
+    monkeypatch.setattr(
+        mr_processor,
+        "get_settings",
+        lambda: SimpleNamespace(gitlab_url="http://gitlab", gitlab_token="gitlab-token"),
+    )
+
+    result = asyncio.run(
+        mr_processor.process_gitlab_event({
+            "project": {"id": 4},
+            "object_attributes": {"iid": 2, "action": "open"},
+        })
+    )
+
+    assert result["validation"]["status"] in {"pass", "warn", "fail"}
+    assert result["summary_status"] == "unavailable"
+    assert "AI Status\nUnavailable" in updates[0]
+    assert "Developer content" in updates[0]

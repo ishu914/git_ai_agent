@@ -40,6 +40,19 @@ def build_ai_section(data: Dict[str, Any]) -> str:
     )
 
 
+def build_ai_unavailable_section(reason: str, validation: Dict[str, Any]) -> str:
+    validation_status = str(validation.get("status", "unknown")).strip()
+    return (
+        f"{AI_SECTION_START}\n"
+        "## AI Review\n\n"
+        "### AI Status\nUnavailable\n\n"
+        f"### Reason\n{_as_text(reason, 'All configured AI providers/models failed to return a usable response.')}\n\n"
+        f"### Deterministic Validation\n{validation_status}\n\n"
+        "AI analysis was unavailable. Human review is still required.\n"
+        f"{AI_SECTION_END}"
+    )
+
+
 def replace_ai_section(existing_description: str, replacement: str) -> str:
     start = existing_description.find(AI_SECTION_START)
     end = existing_description.find(AI_SECTION_END)

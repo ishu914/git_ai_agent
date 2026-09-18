@@ -5,6 +5,9 @@ import pytest
 
 from app.ai.client import OpenRouterClient
 from app.ai.code_reviewer import review_merge_request
+from app.ai.model_discovery import ModelDiscoveryCache, candidates_from_catalog
+from app.ai.orchestrator import AIOrchestrator
+from app.ai.types import AIModelCandidate, AIUnavailableError
 
 
 class FakeResponse:
@@ -164,3 +167,98 @@ def test_code_review_failure_is_unavailable():
         "summary": "AI review could not be completed.",
         "findings": [],
     }
+
+
+def test_model_catalog_filters_non_free_models():
+    catalog = {
+        "data": [
+            {"id": "free/model:free", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "paid/model", "pricing": {"prompt": "1", "completion": "1"}},
+        ]
+    }
+
+    candidates = candidates_from_catalog("openrouter", catalog, free_only=True)
+
+    assert [candidate.model_id for candidate in candidates] == ["free/model:free"]
+
+
+def test_model_discovery_cache_avoids_repeated_fetches():
+    cache = ModelDiscoveryCache()
+    calls = {"count": 0}
+
+    def fetch():
+        calls["count"] += 1
+        return [AIModelCandidate("openrouter", "free/model:free")]
+
+    cache.get_or_fetch("test", 3600, fetch)
+    cache.get_or_fetch("test", 3600, fetch)
+
+    assert calls["count"] == 1
+
+
+def test_orchestrator_falls_back_to_next_model(monkeypatch, tmp_path):
+    empty_env = tmp_path / "empty.env"
+    empty_env.write_text("", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV_FILE", str(empty_env))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "configured-for-test")
+    monkeypatch.setenv("AI_MODEL_COOLDOWN_SECONDS", "300")
+    orchestrator = AIOrchestrator()
+    candidates = [
+        AIModelCandidate("openrouter", "first:free"),
+        AIModelCandidate("openrouter", "second:free"),
+    ]
+    calls = []
+
+    class FakeClient:
+        def __init__(self, model):
+            self.model = model
+
+        def chat_completion(self, *args, **kwargs):
+            calls.append(self.model)
+            if self.model == "first:free":
+                raise RuntimeError("429 quota exhausted")
+            return {"summary": "success"}
+
+    monkeypatch.setattr(orchestrator, "candidates", lambda: candidates)
+    monkeypatch.setattr(orchestrator, "_client_for", lambda candidate: FakeClient(candidate.model_id))
+
+    assert orchestrator.chat_completion([]) == {"summary": "success"}
+    assert calls == ["first:free", "second:free"]
+
+
+def test_orchestrator_reports_unavailable_without_credentials(monkeypatch, tmp_path):
+    empty_env = tmp_path / "empty.env"
+    empty_env.write_text("", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV_FILE", str(empty_env))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    orchestrator = AIOrchestrator()
+
+    with pytest.raises(AIUnavailableError):
+        orchestrator.chat_completion([])
+
+
+def test_orchestrator_uses_groq_after_openrouter_failure(monkeypatch, tmp_path):
+    empty_env = tmp_path / "empty.env"
+    empty_env.write_text("", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV_FILE", str(empty_env))
+    monkeypatch.setenv("AI_TOTAL_MAX_ATTEMPTS", "2")
+    orchestrator = AIOrchestrator()
+    candidates = [
+        AIModelCandidate("openrouter", "free/model:free"),
+        AIModelCandidate("groq", "groq/model"),
+    ]
+
+    class FakeClient:
+        def __init__(self, provider):
+            self.provider = provider
+
+        def chat_completion(self, *args, **kwargs):
+            if self.provider == "openrouter":
+                raise RuntimeError("provider unavailable")
+            return {"summary": "groq success"}
+
+    monkeypatch.setattr(orchestrator, "candidates", lambda: candidates)
+    monkeypatch.setattr(orchestrator, "_client_for", lambda candidate: FakeClient(candidate.provider))
+
+    assert orchestrator.chat_completion([]) == {"summary": "groq success"}

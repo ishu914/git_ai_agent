@@ -10,7 +10,9 @@ The end-state design is a central webhook-driven service that:
 - validates the signature and payload
 - fetches MR metadata and diff from GitLab
 - runs deterministic validation checks
-- triggers AI review and summary generation through OpenRouter
+- triggers AI review and summary generation through a provider-neutral AI orchestrator
+- discovers eligible OpenRouter free models dynamically and falls back across models
+- uses Groq as an optional secondary OpenAI-compatible provider
 - updates only the AI-managed section in the MR description
 - checks approval readiness without automating approval or merge
 
@@ -51,6 +53,19 @@ GITLAB_WEBHOOK_SECRET=
 
 OPENROUTER_API_KEY=
 OPENROUTER_MODEL=
+OPENROUTER_ENABLED=true
+OPENROUTER_MODEL_STRATEGY=dynamic-free
+OPENROUTER_FREE_MODEL_MAX_ATTEMPTS=5
+OPENROUTER_MODEL_DISCOVERY_CACHE_TTL_SECONDS=3600
+
+GROQ_API_KEY=
+GROQ_ENABLED=true
+GROQ_MODEL_STRATEGY=dynamic
+GROQ_MODEL_MAX_ATTEMPTS=3
+GROQ_MODEL_DISCOVERY_CACHE_TTL_SECONDS=3600
+
+AI_TOTAL_MAX_ATTEMPTS=8
+AI_MODEL_COOLDOWN_SECONDS=300
 
 AI_AGENT_HOST=0.0.0.0
 AI_AGENT_PORT=8000
@@ -62,15 +77,32 @@ AI_AGENT_PORT=8000
 - Keep API keys and secrets in environment variables only.
 - The AI model must remain configurable through `OPENROUTER_MODEL`.
 
-## OpenRouter configuration
+## AI provider configuration
 
-This service is designed to use the OpenRouter API in OpenAI-compatible mode. The client should be configured via environment variables and should never hard-code credentials.
+The AI orchestrator uses OpenRouter's model catalog to discover current free models. Models are filtered by free pricing or a `:free` variant and cached for the configured TTL. A model that returns a rate limit, quota, timeout, provider error, malformed response, empty response, or incomplete response is cooled down and the next eligible model is tried.
 
-Planned configuration:
+The optional Groq provider uses its model catalog as a secondary fallback. Missing OpenRouter or Groq credentials do not prevent application startup. If every configured candidate fails, deterministic validation still completes and the MR receives an explicit AI-unavailable status.
 
-- `OPENROUTER_API_KEY`
-- `OPENROUTER_MODEL`
-- timeout and retry settings via application configuration
+The orchestrator never approves or merges an MR. Human approval remains separate.
+
+## AI diagnostics
+
+Run the safe inventory command from the project root:
+
+```bash
+python -m app.ai.diagnostics
+```
+
+It reports whether each provider is configured, discovered model IDs, context lengths, JSON capability metadata, and fallback order. It never prints API keys or request headers.
+
+Useful settings:
+
+- `OPENROUTER_MODEL_STRATEGY=dynamic-free`
+- `OPENROUTER_FREE_MODEL_MAX_ATTEMPTS=5`
+- `OPENROUTER_MODEL_DISCOVERY_CACHE_TTL_SECONDS=3600`
+- `GROQ_MODEL_MAX_ATTEMPTS=3`
+- `AI_TOTAL_MAX_ATTEMPTS=8`
+- `AI_MODEL_COOLDOWN_SECONDS=300`
 
 ## GitLab token creation
 

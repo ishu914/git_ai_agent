@@ -49,6 +49,7 @@ The expected configuration values are:
 ```bash
 GITLAB_URL=http://192.168.2.86
 GITLAB_TOKEN=
+GITLAB_AI_USERNAME=gi_ai_code_reviewer
 GITLAB_WEBHOOK_SECRET=
 
 OPENROUTER_API_KEY=
@@ -76,6 +77,8 @@ AI_AGENT_PORT=8000
 - Never commit the `.env` file.
 - Keep API keys and secrets in environment variables only.
 - The AI model must remain configurable through `OPENROUTER_MODEL`.
+- `GITLAB_TOKEN` must belong to the centralized GitLab service account `gi_ai_code_reviewer`, whose display name should be `GI AI Code Reviewer`. This makes MR descriptions and notes appear as `GI AI Code Reviewer (@gi_ai_code_reviewer)` rather than an Administrator user.
+- Create the service account once at the GitLab instance/group level with access to the projects it reviews; do not create project-specific application tokens.
 
 ## AI provider configuration
 
@@ -103,6 +106,22 @@ Useful settings:
 - `GROQ_MODEL_MAX_ATTEMPTS=3`
 - `AI_TOTAL_MAX_ATTEMPTS=8`
 - `AI_MODEL_COOLDOWN_SECONDS=300`
+
+## Token-efficient MR analysis
+
+The processor runs deterministic validation first, then sends one compact, diff-first analysis request for both the summary and code review. It excludes generated, binary, dependency, vendor, lock, and unchanged low-value content before the request. The result is reused for the MR description and review note.
+
+Budgets are shared per MR and can be configured with:
+
+- `AI_MAX_INPUT_TOKENS_PER_REQUEST`
+- `AI_MAX_OUTPUT_TOKENS_PER_REQUEST`
+- `AI_MAX_TOTAL_TOKENS_PER_MR`
+- `AI_MAX_DIFF_CHARS`
+- `AI_MAX_FILE_CHARS`
+- `AI_MAX_CONTEXT_FILES`
+- `AI_REVIEW_CACHE_TTL_SECONDS`
+
+When configured limits exclude changed content, the generated result reports `Review Scope: partial` and lists excluded files. A deterministic fingerprint prevents another AI call for unchanged project/MR/review content. Provider usage metadata is recorded when available, with conservative estimates otherwise.
 
 ## GitLab token creation
 

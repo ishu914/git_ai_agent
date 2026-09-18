@@ -41,3 +41,9 @@ def test_description_manager_replaces_only_ai_marked_section():
     assert "new" in updated
     assert "## Developer" in updated
     assert "More text" in updated
+
+
+def test_description_manager_returns_identical_text_for_identical_ai_section():
+    original = "Developer\n\n" + build_ai_section({"summary": "same", "risk": "low"}) + "\n"
+
+    assert replace_ai_section(original, build_ai_section({"summary": "same", "risk": "low"})) == original

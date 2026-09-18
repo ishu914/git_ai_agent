@@ -8,6 +8,20 @@ from app.services.description_manager import build_ai_section
 logger = logging.getLogger(__name__)
 
 
+def render_mr_summary(result: Dict[str, Any]) -> str:
+    if not isinstance(result, dict) or not result.get("summary"):
+        return ""
+    return build_ai_section({
+        "summary": result.get("summary"),
+        "change_type": result.get("change_type"),
+        "testing": result.get("testing"),
+        "risk": result.get("risk"),
+        "files_summary": result.get("files_summary"),
+        "review_scope": result.get("review_scope", "full"),
+        "excluded_files": result.get("excluded_files", []),
+    })
+
+
 def generate_mr_summary(ai_client: OpenRouterClient, mr_context: Dict[str, Any]) -> str:
     mr = mr_context.get("merge_request", {})
     project = mr_context.get("project", {})
@@ -28,14 +42,7 @@ def generate_mr_summary(ai_client: OpenRouterClient, mr_context: Dict[str, Any])
         if not isinstance(result, dict) or not result.get("summary"):
             logger.warning("MR summary generation unavailable: missing summary field")
             return ""
-        ai_section = build_ai_section({
-            "summary": result.get("summary"),
-            "change_type": result.get("change_type"),
-            "testing": result.get("testing"),
-            "risk": result.get("risk"),
-            "files_summary": result.get("files_summary"),
-        })
-        return ai_section
+        return render_mr_summary(result)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("MR summary generation failed: %s", exc)
         return ""

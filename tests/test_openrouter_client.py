@@ -262,3 +262,43 @@ def test_orchestrator_uses_groq_after_openrouter_failure(monkeypatch, tmp_path):
     monkeypatch.setattr(orchestrator, "_client_for", lambda candidate: FakeClient(candidate.provider))
 
     assert orchestrator.chat_completion([]) == {"summary": "groq success"}
+
+
+def test_groq_catalog_excludes_audio_models():
+    candidates = candidates_from_catalog(
+        "groq",
+        {
+            "data": [
+                {"id": "whisper-large-v3", "architecture": {"input_modalities": ["audio"], "output_modalities": ["text"]}},
+                {"id": "llama-3.3-70b-versatile", "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]}},
+            ]
+        },
+    )
+
+    assert [candidate.model_id for candidate in candidates] == ["llama-3.3-70b-versatile"]
+
+
+def test_orchestrator_enforces_global_attempt_limit(monkeypatch, tmp_path):
+    empty_env = tmp_path / "empty.env"
+    empty_env.write_text("", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV_FILE", str(empty_env))
+    monkeypatch.setenv("AI_TOTAL_MAX_ATTEMPTS", "2")
+    orchestrator = AIOrchestrator()
+    candidates = [
+        AIModelCandidate("openrouter", "attempt-one:free"),
+        AIModelCandidate("openrouter", "attempt-two:free"),
+        AIModelCandidate("groq", "attempt-three"),
+    ]
+    calls = []
+
+    class FailingClient:
+        def chat_completion(self, *args, **kwargs):
+            calls.append(1)
+            raise RuntimeError("provider unavailable")
+
+    monkeypatch.setattr(orchestrator, "candidates", lambda: candidates)
+    monkeypatch.setattr(orchestrator, "_client_for", lambda candidate: FailingClient())
+
+    with pytest.raises(AIUnavailableError):
+        orchestrator.chat_completion([])
+    assert len(calls) == 2

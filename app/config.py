@@ -14,6 +14,7 @@ class Settings(BaseSettings):
 
     gitlab_url: str = Field(default="http://192.168.2.86", alias="GITLAB_URL")
     gitlab_token: Optional[str] = Field(default=None, alias="GITLAB_TOKEN")
+    gitlab_ai_username: str = Field(default="gi_ai_code_reviewer", alias="GITLAB_AI_USERNAME")
     gitlab_webhook_secret: Optional[str] = Field(default=None, alias="GITLAB_WEBHOOK_SECRET")
     gitlab_webhook_signing_token: Optional[str] = Field(default=None, alias="GITLAB_WEBHOOK_SIGNING_TOKEN")
     gitlab_webhook_timestamp_tolerance_seconds: int = Field(default=300, alias="GITLAB_WEBHOOK_TIMESTAMP_TOLERANCE_SECONDS")
@@ -34,6 +35,13 @@ class Settings(BaseSettings):
 
     ai_total_max_attempts: int = Field(default=8, alias="AI_TOTAL_MAX_ATTEMPTS")
     ai_model_cooldown_seconds: int = Field(default=300, alias="AI_MODEL_COOLDOWN_SECONDS")
+    ai_max_input_tokens_per_request: int = Field(default=12000, alias="AI_MAX_INPUT_TOKENS_PER_REQUEST")
+    ai_max_output_tokens_per_request: int = Field(default=1200, alias="AI_MAX_OUTPUT_TOKENS_PER_REQUEST")
+    ai_max_total_tokens_per_mr: int = Field(default=6000, alias="AI_MAX_TOTAL_TOKENS_PER_MR")
+    ai_max_diff_chars: int = Field(default=24000, alias="AI_MAX_DIFF_CHARS")
+    ai_max_file_chars: int = Field(default=5000, alias="AI_MAX_FILE_CHARS")
+    ai_max_context_files: int = Field(default=20, alias="AI_MAX_CONTEXT_FILES")
+    ai_review_cache_ttl_seconds: int = Field(default=3600, alias="AI_REVIEW_CACHE_TTL_SECONDS")
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -353,3 +353,43 @@ def test_legacy_x_gitlab_token_fallback(monkeypatch):
         headers={"X-Gitlab-Token": "legacy-secret"},
     )
     assert response.status_code == 200
+
+
+def test_ai_user_webhook_is_skipped_before_background_processing(monkeypatch):
+    monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "legacy-secret")
+
+    def fail_process(*args, **kwargs):
+        pytest.fail("AI-generated webhook must not be queued")
+
+    monkeypatch.setattr(mr_processor, "process_gitlab_event", fail_process)
+    response = client.post(
+        "/webhook/gitlab",
+        json={
+            "object_kind": "merge_request",
+            "user": {"username": "gi_ai_code_reviewer"},
+            "object_attributes": {"iid": 12, "action": "update"},
+            "project": {"id": 1},
+        },
+        headers={"X-Gitlab-Token": "legacy-secret"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "skipped"
+    assert response.json()["reason"] == "ai_reviewer_event"
+
+
+def test_completed_webhook_id_is_not_processed_again(monkeypatch):
+    monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "legacy-secret")
+    mr_processor.EVENT_STATES["evt_completed"] = "completed"
+    response = client.post(
+        "/webhook/gitlab",
+        json={
+            "object_kind": "merge_request",
+            "object_attributes": {"iid": 12, "action": "open"},
+            "project": {"id": 1},
+        },
+        headers={"X-Gitlab-Token": "legacy-secret", "X-Gitlab-Event-UUID": "evt_completed"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "duplicate"

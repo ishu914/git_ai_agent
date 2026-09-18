@@ -77,6 +77,7 @@ class OpenRouterClient:
         self.base_url = base_url
         self.timeout = timeout
         self.max_retries = max_retries
+        self.last_usage: Dict[str, int] = {}
 
     def build_chat_payload(
         self,
@@ -186,6 +187,14 @@ class OpenRouterClient:
         except ValueError as exc:
             logger.warning("OpenRouter response envelope was not JSON: model=%s status=%s", self.model, response.status_code)
             raise OpenRouterResponseError("OpenRouter response was not valid JSON") from exc
+
+        usage = content.get("usage") if isinstance(content, dict) else None
+        if isinstance(usage, dict):
+            self.last_usage = {
+                key: int(usage[key])
+                for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                if usage.get(key) is not None
+            }
 
         choices = content.get("choices") if isinstance(content, dict) else None
         if not choices:

@@ -27,6 +27,8 @@ def build_ai_section(data: Dict[str, Any]) -> str:
     testing = _as_text(data.get("testing"), "Not specified")
     risk = _as_text(data.get("risk"), "Not specified").lower()
     files_summary = "\n".join(f"- {item}" for item in _as_text_list(data.get("files_summary")))
+    review_scope = _as_text(data.get("review_scope"), "full")
+    excluded_files = ", ".join(_as_text_list(data.get("excluded_files")))
 
     return (
         f"{AI_SECTION_START}\n"
@@ -36,6 +38,8 @@ def build_ai_section(data: Dict[str, Any]) -> str:
         f"### Files Changed\n{files_summary or 'No file summary available.'}\n\n"
         f"### Testing\n{testing or 'Testing not specified.'}\n\n"
         f"### Risk\n{risk or 'low'}\n"
+        f"### Review Scope\n{review_scope}\n"
+        f"{f'Excluded: {excluded_files}\n' if excluded_files else ''}"
         f"{AI_SECTION_END}"
     )
 

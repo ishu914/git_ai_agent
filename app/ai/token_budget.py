@@ -1,0 +1,109 @@
+import hashlib
+import json
+import os
+from typing import Any, Dict, Iterable, List, Tuple
+
+
+LOW_VALUE_PARTS = (".git", "node_modules", "vendor", "dist", "build", "coverage")
+LOW_VALUE_NAMES = ("lock", ".min.", ".map", ".bundle")
+SOURCE_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rb", ".php", ".sql", ".yaml", ".yml", ".json", ".toml", ".sh"}
+SECURITY_HINTS = ("auth", "login", "permission", "secret", "token", "password", "crypto", "security", "api", "sql", "docker", ".env")
+
+
+def estimate_tokens(value: Any) -> int:
+    if isinstance(value, str):
+        return max(1, (len(value) + 3) // 4)
+    return estimate_tokens(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str))
+
+
+def _is_relevant_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").lower()
+    name = os.path.basename(normalized)
+    if any(part in normalized.split("/") for part in LOW_VALUE_PARTS):
+        return False
+    if any(marker in name for marker in LOW_VALUE_NAMES):
+        return False
+    return True
+
+
+def _priority(path: str, diff: str) -> Tuple[int, str]:
+    lower = path.lower()
+    extension = os.path.splitext(lower)[1]
+    score = 0
+    if extension in SOURCE_EXTENSIONS:
+        score += 30
+    if any(hint in lower for hint in SECURITY_HINTS):
+        score += 40
+    if "binary" in diff.lower() or not diff.strip():
+        score -= 100
+    return (-score, path)
+
+
+def build_compact_review_payload(
+    mr_context: Dict[str, Any],
+    validation: Dict[str, Any],
+    max_diff_chars: int,
+    max_file_chars: int,
+    max_context_files: int,
+) -> Tuple[Dict[str, Any], bool, List[str]]:
+    mr = mr_context.get("merge_request") or {}
+    changes = (mr_context.get("changes") or {}).get("changes") or []
+    selected = []
+    excluded = []
+    for entry in changes:
+        path = str(entry.get("new_path") or entry.get("old_path") or "unknown")
+        diff = str(entry.get("diff") or "")
+        if entry.get("binary") or entry.get("is_binary") or not _is_relevant_path(path) or len(selected) >= max_context_files:
+            excluded.append(path)
+            continue
+        selected.append((path, diff))
+    selected.sort(key=lambda item: _priority(item[0], item[1]))
+
+    remaining = max_diff_chars
+    compact_changes = []
+    for path, diff in selected:
+        if remaining <= 0:
+            excluded.append(path)
+            continue
+        clipped = diff[: min(max_file_chars, remaining)]
+        remaining -= len(clipped)
+        compact_changes.append({"file": path, "diff": clipped})
+        if len(clipped) < len(diff):
+            excluded.append(f"{path} (truncated)")
+
+    payload = {
+        "title": str(mr.get("title") or "")[:500],
+        "description": str(mr.get("description") or "")[:1000],
+        "source_branch": str(mr.get("source_branch") or ""),
+        "target_branch": str(mr.get("target_branch") or ""),
+        "validation": {
+            "status": validation.get("status"),
+            "files": len(mr_context.get("changed_files") or []),
+            "additions": mr_context.get("total_additions", 0),
+            "deletions": mr_context.get("total_deletions", 0),
+            "diff_size": mr_context.get("total_diff_size", 0),
+            "checks": [{"name": check.get("name"), "status": check.get("status")} for check in validation.get("checks", [])],
+        },
+        "changes": compact_changes,
+        "instruction": "Return compact JSON only: summary, change_type, risk, findings, testing, breaking_changes. Report all material security/correctness findings, deduplicate root causes, omit style-only comments. Include review_scope=partial when files are excluded.",
+    }
+    return payload, bool(excluded), excluded
+
+
+def review_fingerprint(project_id: Any, mr_iid: Any, payload: Dict[str, Any]) -> str:
+    material = {"project_id": project_id, "mr_iid": mr_iid, "review": payload}
+    return hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
+def deduplicate_findings(findings: Iterable[Any]) -> List[Any]:
+    result = []
+    seen = set()
+    for finding in findings:
+        if isinstance(finding, dict):
+            key = (str(finding.get("issue") or finding.get("message") or finding), str(finding.get("file") or finding.get("path") or ""))
+        else:
+            key = (str(finding), "")
+        if key not in seen:
+            seen.add(key)
+            result.append(finding)
+    return result

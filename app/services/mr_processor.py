@@ -1,8 +1,8 @@
 import logging
 from typing import Any, Dict, List
 
-from app.ai.code_reviewer import review_merge_request
-from app.ai.mr_summary import generate_mr_summary
+from app.ai.code_reviewer import normalize_review_result
+from app.ai.mr_summary import render_mr_summary
 from app.ai.orchestrator import AIOrchestrator
 from app.config import get_settings
 from app.gitlab.client import GitLabClient
@@ -31,7 +31,7 @@ def mark_event_failed(event_key: str) -> None:
 
 
 def should_skip_duplicate(event_key: str) -> bool:
-    return EVENT_STATES.get(event_key) in {"pending", "processing"}
+    return EVENT_STATES.get(event_key) in {"pending", "processing", "completed"}
 
 
 def build_mr_context(project_id: str, mr_iid: int, client: GitLabClient) -> Dict[str, Any]:
@@ -112,9 +112,18 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
     mr_data = event_data.get("object_attributes", {})
     mr_iid = int(mr_data.get("iid") or mr_data.get("merge_request_iid") or 0)
     action = mr_data.get("action") or event_data.get("event_type") or "updated"
+    event_id = event_data.get("webhook_id") or event_data.get("event_id") or "background"
 
     if not project_id or not mr_iid:
         raise ValueError("GitLab event is missing project ID or MR IID")
+
+    logger.info(
+        "MR processing started: event_id=%s project_id=%s mr_iid=%s action=%s processing_decision=process",
+        event_id,
+        project_id,
+        mr_iid,
+        action,
+    )
 
     dedupe_key = f"{project_id}:{mr_iid}:{action}"
     mark_event_processing(dedupe_key)
@@ -128,10 +137,20 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
     if validation["status"] == "fail":
         logger.warning("Validation failed for project %s MR !%s", project_id, mr_iid)
 
-    summary_orchestrator = AIOrchestrator()
-    review_orchestrator = AIOrchestrator()
-    ai_summary = generate_mr_summary(summary_orchestrator, context)
-    ai_review = review_merge_request(review_orchestrator, context)
+    ai_orchestrator = AIOrchestrator()
+    try:
+        analysis = ai_orchestrator.analyze_mr(project_id, mr_iid, context, validation)
+        ai_summary = render_mr_summary(analysis)
+        ai_review = normalize_review_result(analysis)
+    except Exception as exc:
+        logger.warning(
+            "AI analysis unavailable: project_id=%s mr_iid=%s error=%s",
+            project_id,
+            mr_iid,
+            str(exc)[:200],
+        )
+        ai_summary = ""
+        ai_review = {"status": "unavailable", "summary": "AI review could not be completed.", "findings": []}
 
     description = context["merge_request"].get("description") or ""
     if ai_summary:
@@ -142,7 +161,7 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
                 "\n### AI Review Status\nUnavailable. Human review is still required.\n<!-- AI_REVIEW_END -->",
             )
     else:
-        description_content = build_ai_unavailable_section(summary_orchestrator.last_failure_reason, validation)
+        description_content = build_ai_unavailable_section(ai_orchestrator.last_failure_reason, validation)
     updated_description = replace_ai_section(description, description_content)
     if updated_description != description:
         client.update_merge_request_description(project_id, mr_iid, updated_description)

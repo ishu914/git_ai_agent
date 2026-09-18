@@ -49,6 +49,23 @@ def _supports_json(model: Dict[str, Any]) -> bool:
     return "response_format" in parameters or "structured_outputs" in parameters
 
 
+def _supports_chat(provider: str, model: Dict[str, Any]) -> bool:
+    if provider != "groq":
+        return True
+    model_id = str(model.get("id", "")).lower()
+    excluded_terms = ("whisper", "speech", "audio", "embedding", "moderation", "safety", "guard")
+    if any(term in model_id for term in excluded_terms):
+        return False
+    modalities = model.get("architecture", {})
+    input_modalities = modalities.get("input_modalities") if isinstance(modalities, dict) else None
+    output_modalities = modalities.get("output_modalities") if isinstance(modalities, dict) else None
+    if input_modalities and not any(str(item).lower() in {"text", "image"} for item in input_modalities):
+        return False
+    if output_modalities and "text" not in {str(item).lower() for item in output_modalities}:
+        return False
+    return True
+
+
 def candidates_from_catalog(
     provider: str,
     catalog: Any,
@@ -61,6 +78,8 @@ def candidates_from_catalog(
         if not isinstance(model, dict) or not isinstance(model.get("id"), str):
             continue
         model_id = model["id"]
+        if not _supports_chat(provider, model):
+            continue
         pricing = model.get("pricing") if isinstance(model.get("pricing"), dict) else {}
         is_free = model_id.endswith(":free") or all(str(pricing.get(key, "")) in {"0", "0.0", "0.00"} for key in ("prompt", "completion"))
         if free_only and not is_free:

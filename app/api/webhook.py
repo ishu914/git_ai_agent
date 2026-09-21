@@ -6,15 +6,12 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from app.config import get_settings
-from app.services.mr_processor import (
-    mark_event_failed,
-    mark_event_pending,
-    process_gitlab_event,
-    should_skip_duplicate,
-)
+from app.observability import log_event, record_metric
+from app.services.mr_processor import should_skip_duplicate
+from app.worker.store import JobStore
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -126,20 +123,8 @@ def _is_relevant_mr_event(event_data: Dict[str, Any], action: str) -> bool:
     )
 
 
-async def _run_background_processing(event_data: Dict[str, Any], dedupe_key: str) -> None:
-    logger.info("GitLab MR processing started for event %s", dedupe_key)
-    try:
-        await process_gitlab_event(event_data)
-    except Exception:
-        mark_event_failed(dedupe_key)
-        logger.exception("GitLab MR processing failed for event %s", dedupe_key)
-        return
-
-    logger.info("GitLab MR processing completed for event %s", dedupe_key)
-
-
 @router.post("/webhook/gitlab")
-async def gitlab_webhook(request: Request, background_tasks: BackgroundTasks) -> Dict[str, Any]:
+async def gitlab_webhook(request: Request) -> Dict[str, Any]:
     settings = get_settings()
     raw_body = await request.body()
 
@@ -149,12 +134,20 @@ async def gitlab_webhook(request: Request, background_tasks: BackgroundTasks) ->
 
     if settings.gitlab_webhook_signing_token:
         if not webhook_id:
+            record_metric("webhook_rejected_total")
+            log_event("WEBHOOK_REJECTED", level="WARNING", event_type="merge_request", result="rejected", error_category="validation", reason="missing_webhook_id")
             raise HTTPException(status_code=401, detail="Missing webhook-id")
         if not webhook_timestamp:
+            record_metric("webhook_rejected_total")
+            log_event("WEBHOOK_REJECTED", level="WARNING", event_type="merge_request", result="rejected", error_category="validation", reason="missing_timestamp")
             raise HTTPException(status_code=401, detail="Missing webhook-timestamp")
         if not received_signature:
+            record_metric("webhook_rejected_total")
+            log_event("WEBHOOK_REJECTED", level="WARNING", event_type="merge_request", result="rejected", error_category="validation", reason="missing_signature")
             raise HTTPException(status_code=401, detail="Missing webhook-signature")
         if not verify_gitlab_webhook_timestamp(webhook_timestamp, settings.gitlab_webhook_timestamp_tolerance_seconds):
+            record_metric("webhook_rejected_total")
+            log_event("WEBHOOK_REJECTED", level="WARNING", event_type="merge_request", result="rejected", error_category="timeout", reason="stale_timestamp")
             raise HTTPException(status_code=401, detail="Invalid or expired webhook timestamp")
         try:
             verified = verify_gitlab_webhook_signature(
@@ -165,35 +158,52 @@ async def gitlab_webhook(request: Request, background_tasks: BackgroundTasks) ->
                 received_signature,
             )
         except ValueError as exc:
+            record_metric("webhook_signature_failure_total")
             logger.warning("GitLab webhook signing verification rejected a malformed request")
+            log_event("WEBHOOK_REJECTED", level="WARNING", event_type="merge_request", result="rejected", error_category="authentication", reason="malformed_signature")
             raise HTTPException(status_code=401, detail=str(exc)) from exc
         if not verified:
+            record_metric("webhook_signature_failure_total")
+            log_event("WEBHOOK_REJECTED", level="WARNING", event_type="merge_request", result="rejected", error_category="authentication", reason="invalid_signature")
             raise HTTPException(status_code=401, detail="Invalid GitLab webhook signature")
     else:
         legacy_token = request.headers.get("X-Gitlab-Token")
         if legacy_token is None:
+            record_metric("webhook_rejected_total")
+            log_event("WEBHOOK_REJECTED", level="WARNING", event_type="merge_request", result="rejected", error_category="authentication", reason="missing_legacy_token")
             raise HTTPException(status_code=401, detail="Missing GitLab webhook token")
         secret = settings.gitlab_webhook_secret or ""
         if not secret:
+            record_metric("webhook_rejected_total")
+            log_event("WEBHOOK_REJECTED", level="WARNING", event_type="merge_request", result="rejected", error_category="configuration", reason="missing_legacy_secret")
             raise HTTPException(status_code=500, detail="GitLab webhook secret is not configured")
         if not hmac.compare_digest(legacy_token, secret):
+            record_metric("webhook_signature_failure_total")
+            log_event("WEBHOOK_REJECTED", level="WARNING", event_type="merge_request", result="rejected", error_category="authentication", reason="invalid_legacy_token")
             raise HTTPException(status_code=401, detail="Invalid GitLab webhook token")
 
+    record_metric("webhook_received_total")
     try:
         event_data = await request.json()
     except Exception as exc:
+        record_metric("webhook_rejected_total")
         logger.warning("Malformed GitLab webhook payload received")
+        log_event("WEBHOOK_REJECTED", level="WARNING", event_type="merge_request", result="rejected", error_category="validation", reason="malformed_json")
         raise HTTPException(status_code=400, detail="Malformed JSON payload") from exc
 
     event_name = request.headers.get("X-Gitlab-Event") or "Merge Request Hook"
     try:
         mr_event = _extract_mr_event_metadata(event_data)
     except ValueError as exc:
+        record_metric("webhook_rejected_total")
         logger.warning("Rejected non-MR GitLab webhook: %s", exc)
+        log_event("WEBHOOK_REJECTED", level="WARNING", event_type="merge_request", result="rejected", error_category="validation", reason="non_mr_event")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     actor_username = _actor_username(event_data)
     if actor_username == settings.gitlab_ai_username:
+        record_metric("webhook_rejected_total")
+        log_event("WEBHOOK_SKIPPED", level="INFO", event_type="merge_request", result="skipped", project_id=str(mr_event["project_id"]), mr_iid=mr_event["mr_iid"], reason="ai_reviewer_event")
         logger.info(
             "Skipping MR webhook generated by AI reviewer: event_id=%s project_id=%s mr_iid=%s action=%s actor_username=%s processing_decision=skip",
             request.headers.get("webhook-id") or request.headers.get("X-Gitlab-Event-UUID"),
@@ -205,6 +215,8 @@ async def gitlab_webhook(request: Request, background_tasks: BackgroundTasks) ->
         return {"status": "skipped", "event": event_name, "reason": "ai_reviewer_event"}
 
     if not _is_relevant_mr_event(event_data, str(mr_event["action"])):
+        record_metric("webhook_rejected_total")
+        log_event("WEBHOOK_SKIPPED", level="INFO", event_type="merge_request", result="skipped", project_id=str(mr_event["project_id"]), mr_iid=mr_event["mr_iid"], reason="irrelevant_event")
         logger.info(
             "Skipping irrelevant MR webhook: event_id=%s project_id=%s mr_iid=%s action=%s actor_username=%s processing_decision=skip",
             request.headers.get("webhook-id") or request.headers.get("X-Gitlab-Event-UUID"),
@@ -224,19 +236,52 @@ async def gitlab_webhook(request: Request, background_tasks: BackgroundTasks) ->
     )
 
     if should_skip_duplicate(dedupe_key):
+        record_metric("webhook_duplicate_total")
+        log_event("WEBHOOK_DUPLICATE", level="INFO", event_type="merge_request", result="duplicate", project_id=str(project_id), mr_iid=mr_iid, webhook_id=dedupe_key)
         logger.info("GitLab MR event is already queued or processing: %s", dedupe_key)
         return {"status": "duplicate", "event": event_name}
 
-    mark_event_pending(dedupe_key)
     event_data["webhook_id"] = dedupe_key
+    project_path = str((event_data.get("project") or {}).get("path_with_namespace") or "") or None
+    job_payload = {
+        "webhook_id": dedupe_key,
+        "object_kind": "merge_request",
+        "event_type": event_data.get("event_type"),
+        "project": {"id": project_id, "path_with_namespace": project_path},
+        "object_attributes": {
+            "iid": mr_iid,
+            "action": mr_event["action"],
+            "source_branch": (event_data.get("object_attributes") or {}).get("source_branch"),
+            "target_branch": (event_data.get("object_attributes") or {}).get("target_branch"),
+            "last_commit": (event_data.get("object_attributes") or {}).get("last_commit"),
+        },
+        "user": {"username": actor_username},
+    }
+    try:
+        job, created = JobStore(settings.worker_database_path).enqueue(
+            webhook_id=dedupe_key,
+            project_id=str(project_id),
+            project_path=project_path,
+            mr_iid=mr_iid,
+            action=str(mr_event["action"]),
+            event_type=event_name,
+            payload=job_payload,
+        )
+    except Exception as exc:
+        logger.exception("Durable webhook job persistence failed")
+        raise HTTPException(status_code=503, detail="Webhook job storage is unavailable") from exc
+    if not created:
+        logger.info("GitLab MR event is already persisted: job_id=%s webhook_id=%s", job.job_id, dedupe_key)
+        return {"status": "duplicate", "event": event_name, "job_id": job.job_id}
+    record_metric("webhook_accepted_total")
+    log_event("WEBHOOK_ACCEPTED", level="INFO", event_type="merge_request", result="accepted", project_id=str(project_id), mr_iid=mr_iid, job_id=job.job_id, webhook_id=dedupe_key, worker_id="receiver")
     logger.info(
-        "GitLab MR webhook accepted and queued: event_id=%s project_id=%s mr_iid=%s action=%s actor_username=%s processing_decision=queued",
+        "GitLab MR webhook accepted and durably queued: event_id=%s job_id=%s project_id=%s mr_iid=%s action=%s actor_username=%s processing_decision=queued",
         dedupe_key,
+        job.job_id,
         project_id,
         mr_iid,
         mr_event["action"],
         actor_username,
     )
-    background_tasks.add_task(_run_background_processing, event_data, dedupe_key)
-
-    return {"status": "accepted", "event": event_name}
+    return {"status": "accepted", "event": event_name, "job_id": job.job_id}

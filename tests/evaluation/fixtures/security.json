@@ -1,0 +1,7 @@
+[
+  {"case_id":"security-hardcoded-key","category":"security","file":"app.py","diff":"API_KEY = 'synthetic-key'","must_detect":["credential"],"must_not_detect":[]},
+  {"case_id":"security-sql-injection","category":"security","file":"db.py","diff":"query = 'SELECT * FROM users WHERE id=' + user_id","must_detect":["sql injection"],"must_not_detect":[]},
+  {"case_id":"security-command-injection","category":"security","file":"run.py","diff":"subprocess.run('convert ' + user_input, shell=True)","must_detect":["command injection"],"must_not_detect":[]},
+  {"case_id":"security-path-traversal","category":"security","file":"files.py","diff":"open('/srv/files/' + request.args['name'])","must_detect":["path traversal"],"must_not_detect":[]},
+  {"case_id":"security-disabled-tls","category":"security","file":"client.py","diff":"requests.get(url, verify=False)","must_detect":["tls"],"must_not_detect":[]}
+]

@@ -1,0 +1,5 @@
+[
+  {"case_id":"bug-none-handling","category":"bug","file":"service.py","diff":"return user.profile.name","must_detect":["null"],"must_not_detect":[]},
+  {"case_id":"bug-off-by-one","category":"bug","file":"items.py","diff":"for index in range(len(items) - 1): process(items[index])","must_detect":["off-by-one"],"must_not_detect":[]},
+  {"case_id":"bug-swallowed-exception","category":"quality","file":"worker.py","diff":"try: run()\nexcept Exception: pass","must_detect":["exception"],"must_not_detect":[]}
+]

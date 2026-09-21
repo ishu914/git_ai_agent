@@ -1,7 +1,7 @@
 import json
 
 from app.ai.orchestrator import AIOrchestrator, ANALYSIS_CACHE
-from app.ai.token_budget import build_compact_review_payload, deduplicate_findings, estimate_tokens
+from app.ai.token_budget import REVIEW_POLICY_VERSION, build_compact_review_payload, deduplicate_findings, estimate_tokens, review_fingerprint
 
 
 def _context(changes):
@@ -107,3 +107,10 @@ def test_orchestrator_reuses_cached_analysis(monkeypatch, tmp_path):
     assert first == second
     assert calls["count"] == 1
     ANALYSIS_CACHE.clear()
+
+
+def test_review_fingerprint_includes_policy_version():
+    fingerprint = review_fingerprint("1", 2, {"changes": []})
+
+    assert REVIEW_POLICY_VERSION == "phase4-quality-v1"
+    assert len(fingerprint) == 64

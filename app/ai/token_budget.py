@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 from typing import Any, Dict, Iterable, List, Tuple
 
 
@@ -8,6 +9,23 @@ LOW_VALUE_PARTS = (".git", "node_modules", "vendor", "dist", "build", "coverage"
 LOW_VALUE_NAMES = ("lock", ".min.", ".map", ".bundle")
 SOURCE_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rb", ".php", ".sql", ".yaml", ".yml", ".json", ".toml", ".sh"}
 SECURITY_HINTS = ("auth", "login", "permission", "secret", "token", "password", "crypto", "security", "api", "sql", "docker", ".env")
+REVIEW_POLICY_VERSION = "phase4-quality-v1"
+SECRET_PATTERNS = (
+    re.compile(r"(?i)((?:authorization|auth|password|passwd|token|api[_-]?key|secret|access[_-]?key|private[_-]?key|aws_secret_access_key))\s*[:=]\s*(?:bearer\s+)?([^\s,;\]\)\}\"']+)"),
+    re.compile(r"(?i)\b(?:bearer)\s+([A-Za-z0-9_\-\.]{6,})\b"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{6,}\b"),
+    re.compile(r"\bgho_[A-Za-z0-9]{6,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{6,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{6,}\b"),
+)
+
+
+def redact_sensitive_text(value: str) -> str:
+    redacted = value
+    for pattern in SECRET_PATTERNS:
+        redacted = pattern.sub("[REDACTED]", redacted)
+    return redacted
 
 
 def estimate_tokens(value: Any) -> int:
@@ -52,7 +70,7 @@ def build_compact_review_payload(
     excluded = []
     for entry in changes:
         path = str(entry.get("new_path") or entry.get("old_path") or "unknown")
-        diff = str(entry.get("diff") or "")
+        diff = redact_sensitive_text(str(entry.get("diff") or ""))
         if entry.get("binary") or entry.get("is_binary") or not _is_relevant_path(path) or len(selected) >= max_context_files:
             excluded.append(path)
             continue
@@ -72,8 +90,8 @@ def build_compact_review_payload(
             excluded.append(f"{path} (truncated)")
 
     payload = {
-        "title": str(mr.get("title") or "")[:500],
-        "description": str(mr.get("description") or "")[:1000],
+        "title": redact_sensitive_text(str(mr.get("title") or ""))[:500],
+        "description": redact_sensitive_text(str(mr.get("description") or ""))[:1000],
         "source_branch": str(mr.get("source_branch") or ""),
         "target_branch": str(mr.get("target_branch") or ""),
         "validation": {
@@ -91,7 +109,12 @@ def build_compact_review_payload(
 
 
 def review_fingerprint(project_id: Any, mr_iid: Any, payload: Dict[str, Any]) -> str:
-    material = {"project_id": project_id, "mr_iid": mr_iid, "review": payload}
+    material = {
+        "project_id": project_id,
+        "mr_iid": mr_iid,
+        "review": payload,
+        "review_policy_version": REVIEW_POLICY_VERSION,
+    }
     return hashlib.sha256(json.dumps(material, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 

@@ -1,11 +1,48 @@
 import logging
+import re
 from typing import Any, Dict
+from urllib.parse import unquote
 
 from app.ai.client import OpenRouterClient
 from app.ai.prompts import build_messages_for_review
 from app.ai.token_budget import deduplicate_findings
 
 logger = logging.getLogger(__name__)
+ALLOWED_STATUSES = {"reviewed", "unavailable", "pass", "warn", "fail"}
+ALLOWED_SEVERITIES = {"critical", "high", "medium", "low", "info", "warning"}
+
+
+def _safe_finding(value: Any) -> Dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    issue = value.get("issue") or value.get("message") or value.get("description")
+    file_name = value.get("file") or value.get("path")
+    if not isinstance(issue, str) or not issue.strip() or not isinstance(file_name, str) or not file_name.strip():
+        return None
+    normalized_file = unquote(file_name.strip()).replace("\\", "/")
+    if not normalized_file or normalized_file in {".", ".."}:
+        return None
+    if "\x00" in normalized_file or len(normalized_file) > 300:
+        return None
+    if normalized_file.startswith("/") or normalized_file.startswith("\\") or re.match(r"^[A-Za-z]:/", normalized_file):
+        return None
+    segments = [segment for segment in normalized_file.split("/") if segment not in ("", ".")]
+    if not segments or any(segment == ".." for segment in segments):
+        return None
+    normalized_file = "/".join(segments)
+    severity = str(value.get("severity") or "info").lower().strip()
+    if severity not in ALLOWED_SEVERITIES:
+        severity = "info"
+    line = value.get("line")
+    if line is not None and (isinstance(line, bool) or not isinstance(line, int) or line < 1):
+        line = None
+    return {
+        "severity": severity,
+        "file": normalized_file[:300],
+        "line": line,
+        "issue": issue.strip()[:1000],
+        "recommendation": str(value.get("recommendation") or "").strip()[:1000],
+    }
 
 
 def normalize_review_result(result: Dict[str, Any]) -> Dict[str, Any]:
@@ -16,9 +53,13 @@ def normalize_review_result(result: Dict[str, Any]) -> Dict[str, Any]:
         findings = [findings]
     if not isinstance(findings, list):
         findings = []
+    findings = [finding for finding in (_safe_finding(item) for item in findings) if finding is not None]
     findings = deduplicate_findings(findings)
+    status = str(result.get("status") or "reviewed").lower().strip()
+    if status not in ALLOWED_STATUSES:
+        status = "reviewed"
     return {
-        "status": str(result.get("status") or "reviewed"),
+        "status": status,
         "summary": str(result["summary"]).strip(),
         "findings": findings,
         "review_scope": result.get("review_scope", "full"),

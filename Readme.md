@@ -123,6 +123,20 @@ Budgets are shared per MR and can be configured with:
 
 When configured limits exclude changed content, the generated result reports `Review Scope: partial` and lists excluded files. A deterministic fingerprint prevents another AI call for unchanged project/MR/review content. Provider usage metadata is recorded when available, with conservative estimates otherwise.
 
+## AI review evaluation
+
+Synthetic deterministic evaluation cases live under `tests/evaluation/fixtures/` and cover security vulnerabilities, bugs, performance, safe code, and prompt injection. `tests/evaluation/test_review_quality.py` evaluates semantic invariants such as required concepts, prohibited false positives, safe file references, severity validity, finding count, and partial review scope. It uses mocked structured results and never calls OpenRouter or Groq.
+
+Run the deterministic evaluation tests with:
+
+```bash
+python -m pytest tests/evaluation -q
+```
+
+Live provider evaluation is intentionally separate and is not required by CI. Any future live run must use synthetic fixtures, explicit credentials outside the repository, and record provider/model, prompt policy version, configuration, detection results, false positives, malformed outputs, incomplete responses, and partial-scope counts without storing complete provider responses or secrets.
+
+The review fingerprint includes the relevant compact diff, project/MR identity, source commit, and `REVIEW_POLICY_VERSION`. Prompt or schema policy changes can therefore trigger fresh analysis without invalidating unrelated historical work. Webhook jobs retain only the minimal event envelope required to refetch authoritative MR state; MR descriptions and source diffs are not stored in the queue payload.
+
 ## GitLab token creation
 
 Use a dedicated bot or service account for GitLab API access. Create a personal access token (PAT) or project/service account token with the smallest permissions required for:
@@ -157,6 +171,52 @@ Or through uvicorn directly:
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
+
+## Durable worker queue
+
+Webhook requests persist validated events into the agent's own SQLite database at `WORKER_DATABASE_PATH` and return without running GitLab or AI work. SQLite uses WAL mode and transactional atomic claims. The worker runs separately:
+
+```bash
+python -m app.worker.runner
+```
+
+The receiver and worker may be restarted independently. Configure `WORKER_CONCURRENCY`, `WORKER_LEASE_SECONDS`, `WORKER_MAX_ATTEMPTS`, and the backoff settings in the environment. Expired leases are recovered, transient failures enter `RETRY_WAIT`, and permanently failed or exhausted jobs enter `DEAD_LETTER`.
+
+Pending jobs for the same project/MR are coalesced when a newer event arrives. The worker still fetches the authoritative current MR state before processing. Inspect queued jobs from Python with `JobStore(WORKER_DATABASE_PATH).list_jobs()`; operational recovery should use the store's explicit state transitions rather than editing GitLab's database.
+
+SQLite is selected for this single-server phase because it is durable, transactional, dependency-free, and easy to operate. It is not a substitute for PostgreSQL under high multi-host write contention; migrate the store behind the same interface before scaling across hosts.
+
+### Queue operations
+
+```bash
+python -m app.worker.runner --status
+python -m app.worker.runner --list-dead-letter
+python -m app.worker.runner --retry-job JOB_ID
+python -m app.worker.runner --cleanup-retention
+python -m app.worker.runner --backup /var/backups/git-ai-agent/jobs.sqlite3
+```
+
+Retention removes only old `COMPLETED`, `OBSOLETE`, and `DEAD_LETTER` jobs. Active, pending, processing, and retryable jobs are retained. Dead-letter requeue is limited to jobs currently in `DEAD_LETTER` state and does not create a new webhook event.
+
+The backup command uses SQLite's online backup API, so it creates a consistent snapshot while the worker is active. Back up `WORKER_DATABASE_PATH` regularly to a separate location, retain multiple known-good snapshots, and verify a backup by opening it with SQLite or running the worker status command against it. Restore by stopping the receiver and worker, replacing the database with a verified snapshot, and restarting both services. Any jobs received after the snapshot and before failure must be redelivered by GitLab or recovered from its webhook retry history.
+
+`/health` only reports that the API process is alive. `/ready` checks that the configured queue database can be initialized and reports worker enablement; it does not call GitLab or AI providers.
+
+The worker handles SIGINT and SIGTERM by stopping new claims, allowing active jobs to finish, and exiting cleanly. Unexpected termination is recovered through job leases on the next worker startup.
+
+## Security model
+
+GitLab webhook signatures are verified against the raw request body using the configured signing token, timestamp tolerance, and constant-time comparison before event persistence. `webhook-id` is durably unique, so replay protection survives process restarts within the configured retention window.
+
+All GitLab repository content is untrusted data. Prompt instructions remain authoritative, the AI has no tools, and AI output can only become validated MR description/note text through fixed GitLab client methods. The agent never executes repository code, shell commands, arbitrary URLs, approval, merge, branch writes, user administration, or project-permission changes.
+
+The GitLab token should belong to `gi_ai_code_reviewer` and require only project/group access sufficient to read project and MR data, read changes/commits/approvals, update MR descriptions, and create/update MR notes. Administrator privileges are not required. The GitLab client exposes only those fixed read/write operations; repository content cannot select an endpoint.
+
+Diffs sent to AI providers are filtered, size-limited, and redacted for common credential patterns. AI findings are validated for safe relative file references, bounded fields, supported severities, and positive integer line numbers. Provider errors and GitLab API errors do not include raw response bodies or credentials in external errors.
+
+The queue database and online backups must be stored outside any web-served directory with owner-only permissions on Linux (`0700` directory, `0600` files). Configure firewall rules so port 8000 is reachable only by the GitLab host or required reverse proxy. HTTPS/TLS should be provided by a controlled internal reverse proxy before exposing the service beyond the trusted network.
+
+For future systemd deployment, run receiver and worker under a dedicated unprivileged Linux user with access only to the application, queue database, restricted backup directory, and required network destinations. Use restart limits, log rotation, and no shell privileges beyond service startup.
 
 ## Testing webhook
 
@@ -195,6 +255,31 @@ This initial service does not yet include project configuration files. The proje
 - If the service fails to bind to the port, ensure the configured port is free.
 - If `.env` values are not loaded, confirm the file exists in the project root and is readable.
 - If you see import errors, reinstall dependencies with `pip install -r requirements.txt`.
+
+## Production deployment (Phase 6)
+
+This repository is prepared for a single-server Linux deployment without changing the core architecture. The receiver and worker remain separate processes, SQLite remains the durable queue, and the application continues to read configuration from environment variables rather than hardcoded Linux paths.
+
+Production deployment guidance and service templates are documented in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). The repository also includes templates under [deploy/systemd](deploy/systemd).
+
+### Deployment constraints
+
+- one Linux server, GitLab and the AI agent on the same network
+- separate receiver and worker systemd units
+- SQLite queue persisted outside the repo under a service-owned directory
+- service user with minimal Linux permissions
+- environment file stored outside Git under `/etc/git-ai-reviewer/agent.env` or a similar service-protected path
+- backup and retention jobs managed by systemd timers or cron
+- receiver and worker restart behavior documented and recoverable
+
+### Phase status
+
+- Phase 1: durable queue + worker
+- Phase 2: operational reliability
+- Phase 3: security hardening
+- Phase 4: AI review quality + evaluation
+- Phase 5: observability
+- Phase 6: Linux production deployment templates and deployment documentation
 
 ## Phase status
 

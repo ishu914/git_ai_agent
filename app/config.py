@@ -43,12 +43,37 @@ class Settings(BaseSettings):
     ai_max_context_files: int = Field(default=20, alias="AI_MAX_CONTEXT_FILES")
     ai_review_cache_ttl_seconds: int = Field(default=3600, alias="AI_REVIEW_CACHE_TTL_SECONDS")
 
+    worker_enabled: bool = Field(default=True, alias="WORKER_ENABLED")
+    worker_database_path: str = Field(default="data/jobs.sqlite3", alias="WORKER_DATABASE_PATH")
+    worker_concurrency: int = Field(default=2, ge=1, le=32, alias="WORKER_CONCURRENCY")
+    ai_max_concurrent_reviews: int = Field(default=2, ge=1, le=32, alias="AI_MAX_CONCURRENT_REVIEWS")
+    worker_max_attempts: int = Field(default=3, ge=1, le=20, alias="WORKER_MAX_ATTEMPTS")
+    worker_lease_seconds: int = Field(default=900, ge=30, alias="WORKER_LEASE_SECONDS")
+    worker_poll_interval_seconds: float = Field(default=2.0, gt=0, alias="WORKER_POLL_INTERVAL_SECONDS")
+    worker_backoff_base_seconds: int = Field(default=5, ge=1, alias="WORKER_BACKOFF_BASE_SECONDS")
+    worker_backoff_max_seconds: int = Field(default=300, ge=1, alias="WORKER_BACKOFF_MAX_SECONDS")
+    worker_job_retention_days: int = Field(default=90, ge=1, alias="WORKER_JOB_RETENTION_DAYS")
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        populate_by_name=True,
         extra="ignore",
     )
+
+    def validate_required_runtime(self) -> None:
+        """Fail clearly when the application cannot run in production."""
+        if not self.gitlab_url:
+            raise ValueError("GITLAB_URL is missing")
+        if not self.gitlab_token:
+            raise ValueError("GITLAB_TOKEN is missing")
+        if not self.gitlab_webhook_signing_token and not self.gitlab_webhook_secret:
+            raise ValueError("GITLAB_WEBHOOK_SIGNING_TOKEN is missing")
+        if not self.worker_database_path:
+            raise ValueError("WORKER_DATABASE_PATH is missing")
+        if not self.openrouter_api_key and not self.groq_api_key:
+            raise ValueError("OPENROUTER_API_KEY is missing and GROQ_API_KEY is missing")
 
     @classmethod
     def settings_customise_sources(

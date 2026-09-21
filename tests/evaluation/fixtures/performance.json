@@ -1,0 +1,4 @@
+[
+  {"case_id":"performance-n-plus-one","category":"performance","file":"orders.py","diff":"for order in orders: db.query('SELECT * FROM items WHERE order_id=?', order.id)","must_detect":["n+1"],"must_not_detect":[]},
+  {"case_id":"performance-quadratic","category":"performance","file":"dedupe.py","diff":"for left in values:\n for right in values: compare(left, right)","must_detect":["quadratic"],"must_not_detect":[]}
+]

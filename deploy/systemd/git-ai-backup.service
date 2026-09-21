@@ -1,0 +1,11 @@
+[Unit]
+Description=GitLab AI Reviewer SQLite backup
+
+[Service]
+Type=oneshot
+User=git-ai-reviewer
+Group=git-ai-reviewer
+WorkingDirectory=/opt/git-ai-reviewer/application
+EnvironmentFile=/etc/git-ai-reviewer/agent.env
+ExecStart=/opt/git-ai-reviewer/venv/bin/python -m app.worker.runner --backup /var/backups/git-ai-reviewer/jobs.sqlite3.backup
+

@@ -1,0 +1,10 @@
+[Unit]
+Description=GitLab AI Reviewer queue retention cleanup
+
+[Service]
+Type=oneshot
+User=git-ai-reviewer
+Group=git-ai-reviewer
+WorkingDirectory=/opt/git-ai-reviewer/application
+EnvironmentFile=/etc/git-ai-reviewer/agent.env
+ExecStart=/opt/git-ai-reviewer/venv/bin/python -m app.worker.runner --cleanup-retention

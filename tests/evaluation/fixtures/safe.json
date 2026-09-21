@@ -1,0 +1,5 @@
+[
+  {"case_id":"safe-parameterized-sql","category":"safe","file":"db.py","diff":"cursor.execute('SELECT * FROM users WHERE id=?', (user_id,))","must_detect":[],"must_not_detect":["sql injection"]},
+  {"case_id":"safe-validated-path","category":"safe","file":"files.py","diff":"path = allowed_root / validated_name\npath.resolve().relative_to(allowed_root)","must_detect":[],"must_not_detect":["path traversal"]},
+  {"case_id":"safe-tls","category":"safe","file":"client.py","diff":"requests.get(url, verify=True)","must_detect":[],"must_not_detect":["tls"]}
+]

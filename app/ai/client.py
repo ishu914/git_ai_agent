@@ -146,16 +146,38 @@ class OpenRouterClient:
         try:
             body = response.json()
         except ValueError:
-            return "unparseable_error_response"
+            return "provider_error"
         if isinstance(body, dict):
             error = body.get("error")
             if isinstance(error, dict):
                 message = error.get("message")
                 if isinstance(message, str):
-                    return message[:200]
+                    lowered = message.lower()
+                    if "quota" in lowered or "rate limit" in lowered or "limit reached" in lowered:
+                        return "rate_limited_or_quota_exhausted"
+                    if "auth" in lowered or "unauthorized" in lowered or "forbidden" in lowered:
+                        return "authentication_failed"
+                    if "not found" in lowered or "model" in lowered and "not found" in lowered:
+                        return "model_not_found"
+                    if "timeout" in lowered or "timed out" in lowered:
+                        return "provider_timeout"
+                    if "malformed" in lowered or "invalid" in lowered or "schema" in lowered:
+                        return "invalid_provider_response"
+                    return "provider_rejected_request"
             if isinstance(error, str):
-                return error[:200]
-        return "openrouter_request_rejected"
+                lowered = error.lower()
+                if "quota" in lowered or "rate limit" in lowered or "limit reached" in lowered:
+                    return "rate_limited_or_quota_exhausted"
+                if "auth" in lowered or "unauthorized" in lowered or "forbidden" in lowered:
+                    return "authentication_failed"
+                if "not found" in lowered or "model" in lowered and "not found" in lowered:
+                    return "model_not_found"
+                if "timeout" in lowered or "timed out" in lowered:
+                    return "provider_timeout"
+                if "malformed" in lowered or "invalid" in lowered or "schema" in lowered:
+                    return "invalid_provider_response"
+                return "provider_rejected_request"
+        return "provider_error"
 
     def chat_completion(self, messages: List[Dict[str, Any]], temperature: float = 0.2, max_tokens: Optional[int] = None) -> Dict[str, Any]:
         payload = self.build_chat_payload(messages=messages, temperature=temperature, max_tokens=max_tokens)

@@ -23,3 +23,8 @@ htmlcov/
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Durable queue data and backups
+data/*.sqlite3
+data/*.sqlite3-*
+backups/

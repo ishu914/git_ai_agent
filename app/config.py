@@ -44,6 +44,19 @@ class Settings(BaseSettings):
     ai_review_cache_ttl_seconds: int = Field(default=3600, alias="AI_REVIEW_CACHE_TTL_SECONDS")
 
     ai_max_concurrent_reviews: int = Field(default=2, ge=1, le=32, alias="AI_MAX_CONCURRENT_REVIEWS")
+    max_concurrent_mr_jobs: int = Field(default=2, ge=1, le=32, alias="MAX_CONCURRENT_MR_JOBS")
+
+    database_path: str = Field(default="data/events.sqlite3", alias="DATABASE_PATH")
+    worker_database_path: str = Field(default="data/events.sqlite3", alias="WORKER_DATABASE_PATH")
+    webhook_max_body_bytes: int = Field(default=1048576, alias="WEBHOOK_MAX_BODY_BYTES")
+    webhook_max_concurrent_requests: int = Field(default=10, alias="WEBHOOK_MAX_CONCURRENT_REQUESTS")
+    stale_processing_timeout_seconds: int = Field(default=300, alias="STALE_PROCESSING_TIMEOUT_SECONDS")
+    event_max_attempts: int = Field(default=3, alias="EVENT_MAX_ATTEMPTS")
+    event_retry_backoff_base_seconds: int = Field(default=5, alias="EVENT_RETRY_BACKOFF_BASE_SECONDS")
+    event_retry_backoff_max_seconds: int = Field(default=300, alias="EVENT_RETRY_BACKOFF_MAX_SECONDS")
+    event_retention_days: int = Field(default=90, alias="EVENT_RETENTION_DAYS")
+    shutdown_timeout_seconds: int = Field(default=15, alias="SHUTDOWN_TIMEOUT_SECONDS")
+    ai_external_providers_allowed: bool = Field(default=True, alias="AI_EXTERNAL_PROVIDERS_ALLOWED")
 
     model_config = SettingsConfigDict(
         env_file=".env",

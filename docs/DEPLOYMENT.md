@@ -1,210 +1,175 @@
-# GitLab AI Agent Production Deployment
+# GitLab AI Agent — Phase 9 Production Reliability & Security Deployment Guide
 
-This is the active deployment model:
+## 1. Architecture Overview
 
-- one Linux server
-- one FastAPI/Uvicorn process
-- one systemd service: `git-ai-agent.service`
-- no worker process, queue database, backup timer, or second application service
+The GitLab AI Agent operates on a **Single-Process / Single-Service Architecture**:
 
-## Runtime flow
-
-```text
-GitLab System Hook -> FastAPI -> in-process MR task -> GitLab MR/diff
-  -> deterministic validation -> AI orchestration/fallback
-  -> controlled MR description section and AI review note
+```
+GitLab Webhook (HTTPS)
+       ↓
+Reverse Proxy (Nginx / Caddy TLS Termination)
+       ↓ HTTP
+FastAPI / Uvicorn (127.0.0.1:8000)
+       ↓
+SQLite Durable Event Store (data/events.sqlite3) [In-Process]
+       ↓
+In-Process Event Manager & Concurrency Control
+       ↓
+GitLab API + Validation Engine + AI Provider Fallback
+       ↓
+MR Description Update & Review Note
 ```
 
-The process has no durable queue. In-flight work is lost if the process exits; systemd restarts the service and GitLab may redeliver webhook events according to its own retry policy.
+- **One Application**: FastAPI app.
+- **One Process**: Uvicorn process listening on `127.0.0.1:8000`.
+- **One Systemd Service**: `git-ai-agent.service`.
+- **In-Process Durable Event Persistence**: Accepted webhooks are persisted to SQLite (`data/events.sqlite3`) before HTTP 200 is returned.
 
-## Prerequisites
+---
 
-- Ubuntu or another supported Linux distribution
-- Python 3.12 with venv support
-- network access to GitLab and configured AI providers
-- a dedicated unprivileged account such as `git-ai-reviewer`
-- a GitLab service account named `gi_ai_code_reviewer` with only the required project/MR permissions
+## 2. Durable Event Store & Crash Recovery
 
-## Filesystem and service user
+### Event Lifecycle States
+Events move through the following lifecycle:
+- `pending`: Received and persisted in SQLite before acknowledging webhook.
+- `processing`: Claimed by in-process manager for execution.
+- `completed`: Successfully processed.
+- `retry`: Failed due to transient error, scheduled for exponential backoff retry.
+- `failed`: Dead-lettered after reaching maximum attempts or encountering permanent error.
+- `obsolete`: Replaced by a newer event for the same Merge Request.
 
+### Crash Recovery Protocol
+On application startup (`lifespan` startup handler):
+1. `EventStore.recover_stale_events(stale_timeout_seconds=300)` inspects events left in `processing` state by a previous crash.
+2. Stale events are reset to `retry` state and scheduled for execution.
+3. Unfinished tasks are never lost across process restarts.
+
+---
+
+## 3. Reverse Proxy & TLS Termination
+
+Raw Uvicorn must **never** be exposed directly to untrusted external networks. HTTPS must terminate at a reverse proxy.
+
+### Nginx Reverse Proxy Configuration
+Add the following block to `/etc/nginx/sites-available/gitlab-ai-agent`:
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name git-ai-agent.internal.domain;
+
+    ssl_certificate /etc/ssl/certs/git-ai-agent.crt;
+    ssl_certificate_key /etc/ssl/private/git-ai-agent.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+
+    client_max_body_size 2M;
+
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+- Webhook URL configured in GitLab: `https://git-ai-agent.internal.domain/webhook/gitlab`
+- Uvicorn binding: `127.0.0.1:8000` (loopback interface only).
+
+---
+
+## 4. Graceful Shutdown & Systemd Coordination
+
+### Timeout Coordination
+- **Application Shutdown Timeout**: `SHUTDOWN_TIMEOUT_SECONDS=15`
+- **Systemd Stop Timeout**: `TimeoutStopSec=30`
+
+When systemd sends `SIGTERM`:
+1. FastAPI lifespan shutdown triggers `InProcessEventManager.shutdown()`.
+2. Stop scheduling new tasks.
+3. Wait up to 15 seconds for active MR processing tasks to finish cleanly.
+4. Systemd allows up to 30 seconds before sending `SIGKILL`. If tasks do not finish within 15s, remaining active task state remains saved in SQLite as `processing` and will be recovered automatically on restart.
+
+---
+
+## 5. Webhook Security & Protection
+
+1. **Request Body Size Limit**: `WEBHOOK_MAX_BODY_BYTES=1048576` (1MB). Payloads exceeding 1MB are rejected with HTTP 413 Payload Too Large.
+2. **Webhook Authentication**:
+   - Standard Webhook signing tokens (`GITLAB_WEBHOOK_SIGNING_TOKEN=whsec_...` using HMAC-SHA256).
+   - Legacy secret token (`GITLAB_WEBHOOK_SECRET=...` using constant-time `hmac.compare_digest`).
+3. **Concurrency Control**: `MAX_CONCURRENT_MR_JOBS=2` limits concurrent AI review processing tasks in-process without blocking `/health`, `/ready`, or `/metrics`.
+
+---
+
+## 6. AI Data Governance & Project Policy
+
+### Configuration
+Controlled globally via environment:
+```env
+AI_EXTERNAL_PROVIDERS_ALLOWED=true
+```
+
+And overridden on a per-project basis in `config/projects/<project-name>.yaml`:
+```yaml
+ai:
+  external_providers_allowed: false
+```
+
+### Behavior
+- If `external_providers_allowed` is `false`, source code and diffs are **never** sent to external providers (OpenRouter / Groq).
+- If no internal provider (such as local AECO_AI) is configured, the agent fails safely with status `"unavailable"` and error category `"configuration"`.
+
+---
+
+## 7. Secret Rotation Procedures
+
+### Rotating GitLab PAT
+1. Generate new Personal Access Token in GitLab (`api` scope).
+2. Update `/etc/git-ai-reviewer/agent.env`:
+   `GITLAB_TOKEN=glpat-newtoken...`
+3. Restart service: `sudo systemctl restart git-ai-agent`
+
+### Rotating Webhook Signing Token
+1. Generate new signing token (`whsec_...`) in GitLab.
+2. Update `/etc/git-ai-reviewer/agent.env`:
+   `GITLAB_WEBHOOK_SIGNING_TOKEN=whsec_newtoken...`
+3. Restart service: `sudo systemctl restart git-ai-agent`
+
+### Rotating OpenRouter / Groq Keys
+1. Generate key in provider console.
+2. Update `OPENROUTER_API_KEY` or `GROQ_API_KEY` in `/etc/git-ai-reviewer/agent.env`.
+3. Restart service: `sudo systemctl restart git-ai-agent`
+
+---
+
+## 8. Backup & Database Retention
+
+### Retention Policy
+- `EVENT_RETENTION_DAYS=90`: Purges `completed`, `failed`, and `obsolete` events older than 90 days.
+- Active (`pending`, `processing`, `retry`) events are **never** deleted.
+- Run retention cleanup CLI: `python -m app.worker.runner --cleanup-retention`
+
+### SQLite Backup Procedure
+SQLite WAL mode allows live hot backups without locking reads or writes:
 ```bash
-sudo useradd --system --home /opt/git-ai-reviewer --no-create-home --shell /usr/sbin/nologin git-ai-reviewer
-sudo install -d -o git-ai-reviewer -g git-ai-reviewer -m 750 /opt/git-ai-reviewer
-sudo install -d -o git-ai-reviewer -g git-ai-reviewer -m 750 /opt/git-ai-reviewer/application
-sudo install -d -o git-ai-reviewer -g git-ai-reviewer -m 750 /opt/git-ai-reviewer/venv
-sudo install -d -o root -g root -m 700 /etc/git-ai-reviewer
-sudo install -d -o git-ai-reviewer -g git-ai-reviewer -m 750 /var/log/git-ai-reviewer
-sudo install -o root -g root -m 600 /dev/null /etc/git-ai-reviewer/agent.env
+python -m app.worker.runner --backup /var/backups/git-ai-agent/events-$(date +%F).sqlite3
 ```
 
-The application user needs read access to the application, virtual environment, and environment file, plus write access only to the configured log directory. The environment file must not be stored in the repository.
+---
 
-## Install the application
+## 9. Observability & Health Check Endpoints
 
-```bash
-sudo git clone <repository-url> /opt/git-ai-reviewer/application
-sudo python3.12 -m venv /opt/git-ai-reviewer/venv
-sudo /opt/git-ai-reviewer/venv/bin/pip install --upgrade pip
-sudo /opt/git-ai-reviewer/venv/bin/pip install -r /opt/git-ai-reviewer/application/requirements.txt
-sudo chown -R git-ai-reviewer:git-ai-reviewer /opt/git-ai-reviewer
-```
+- **`/health`**: Fast lightweight process health check (200 OK). No external API calls.
+- **`/ready`**: Verifies SQLite database connection, configuration validity, and AI provider availability.
+- **`/metrics`**: Exposes Prometheus-style metric snapshots (`webhook_received_total`, `events_persisted_total`, `events_completed_total`, `events_failed_total`, `active_mr_jobs`).
 
-## Environment and secrets
+---
 
-Populate `/etc/git-ai-reviewer/agent.env` with the required values:
+## 10. Limitations & Atomic Operations
 
-```text
-GITLAB_URL=http://gitlab.internal
-GITLAB_TOKEN=<service-account-token>
-GITLAB_AI_USERNAME=gi_ai_code_reviewer
-GITLAB_WEBHOOK_SIGNING_TOKEN=whsec_<signing-token>
-OPENROUTER_API_KEY=<optional-authorized-key>
-OPENROUTER_MODEL=<configured-model>
-OPENROUTER_ENABLED=true
-GROQ_API_KEY=<optional-authorized-key>
-GROQ_ENABLED=true
-AI_AGENT_HOST=0.0.0.0
-AI_AGENT_PORT=8000
-```
-
-```bash
-sudo chown root:root /etc/git-ai-reviewer/agent.env
-sudo chmod 600 /etc/git-ai-reviewer/agent.env
-```
-
-Never put tokens in the unit file, source, YAML, README, tests, logs, or Git. Do not print the environment file during diagnostics. Optional providers such as AECO_AI must not make startup fail when absent.
-
-## systemd installation
-
-Install [deploy/systemd/git-ai-agent.service](../deploy/systemd/git-ai-agent.service):
-
-```bash
-sudo cp /opt/git-ai-reviewer/application/deploy/systemd/git-ai-agent.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now git-ai-agent.service
-```
-
-The unit directly executes the production virtual environment; activation is not required:
-
-```text
-/opt/git-ai-reviewer/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
-```
-
-It uses `Restart=on-failure` with a five-second delay, starts after `network-online.target`, runs as `git-ai-reviewer`, and does not configure multiple Uvicorn workers.
-
-The unit uses `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome`, `RestrictSUIDSGID`, `RestrictNamespaces`, `LockPersonality`, `TasksMax=64`, and `MemoryMax=1G`. Outbound IPv4/IPv6/Unix networking remains allowed for GitLab and AI provider access. Adjust the memory limit only after observing real workload behavior.
-
-## Service operations
-
-```bash
-sudo systemctl status git-ai-agent.service
-sudo systemctl restart git-ai-agent.service
-sudo systemctl stop git-ai-agent.service
-sudo systemctl start git-ai-agent.service
-journalctl -u git-ai-agent.service -f
-journalctl -u git-ai-agent.service --no-pager -n 100
-```
-
-Uvicorn receives normal systemd termination signals. There is no durable queue or crash recovery for in-flight MR work.
-
-## GitLab System Hook
-
-Configure the GitLab System Hook for Merge Request events at:
-
-```text
-https://<internal-host>/webhook/gitlab
-```
-
-Configure the same signing token in `GITLAB_WEBHOOK_SIGNING_TOKEN`. The endpoint validates the raw body, webhook ID, signature, and timestamp before scheduling an in-process task. Invalid or stale events must not reach AI processing.
-
-## Health, readiness, and metrics
-
-```bash
-curl -fsS http://127.0.0.1:8000/health
-curl -fsS http://127.0.0.1:8000/ready
-curl -fsS http://127.0.0.1:8000/metrics
-```
-
-`/health` checks process liveness without calling AI. `/ready` reports the single-process runtime state. `/metrics` exposes bounded operational counters without secrets, source, complete diffs, prompts, or raw provider responses.
-
-## Logging and failure handling
-
-Structured logs identify webhook receipt/acceptance, processing stages, provider/model selection, fallbacks, GitLab failures, AI failures, description updates, review notes, and commit-message preservation/generation. Secret values, authorization headers, complete sensitive diffs, and credentials must remain redacted.
-
-GitLab and AI timeouts are bounded by the existing 30-second client timeouts and retry limits. Provider failures are isolated to the MR task; no fake review is written. GitLab failures are reported safely and do not grant approval, merge, push, branch, user, or permission capabilities.
-
-Journald is the logging mechanism. Configure host-level journal retention/size limits according to the server policy; do not add a second application logging service.
-
-## Update procedure
-
-```bash
-cd /opt/git-ai-reviewer/application
-git fetch --prune
-git pull --ff-only
-/opt/git-ai-reviewer/venv/bin/pip install -r requirements.txt
-/opt/git-ai-reviewer/venv/bin/python -m pytest -q
-sudo systemctl restart git-ai-agent.service
-curl -fsS http://127.0.0.1:8000/health
-curl -fsS http://127.0.0.1:8000/ready
-```
-
-Perform a controlled smoke test after restart and inspect the journal for processing completion.
-
-## Rollback procedure
-
-```bash
-cd /opt/git-ai-reviewer/application
-git log --oneline -5
-git checkout <known-good-commit>
-/opt/git-ai-reviewer/venv/bin/python -m pytest -q
-sudo systemctl restart git-ai-agent.service
-curl -fsS http://127.0.0.1:8000/health
-curl -fsS http://127.0.0.1:8000/ready
-```
-
-Do not roll back by copying secrets or runtime files into the repository.
-
-## Reboot and smoke-test procedure
-
-On an approved non-production Linux host:
-
-```bash
-sudo systemctl enable --now git-ai-agent.service
-systemctl is-active git-ai-agent.service
-curl -fsS http://127.0.0.1:8000/health
-curl -fsS http://127.0.0.1:8000/ready
-sudo reboot
-```
-
-After reboot:
-
-```bash
-systemctl is-active git-ai-agent.service
-curl -fsS http://127.0.0.1:8000/health
-curl -fsS http://127.0.0.1:8000/ready
-curl -fsS http://127.0.0.1:8000/metrics
-```
-
-Then send one harmless controlled MR and verify the System Hook, in-process processing, deterministic validation, AI gate/provider, description update, review note, correct file statistics, no duplicate AI section, and no secret exposure.
-
-## Concurrency and failure injection
-
-Use a non-production project and mocks where possible. Trigger multiple webhook events close together and verify the HTTP process remains responsive, each MR remains isolated, and duplicate events do not create uncontrolled notes or sections. Exercise invalid signatures, malformed payloads, GitLab 401/403/404/5xx/timeouts, provider timeout/429/malformed/incomplete responses, and missing optional provider configuration without damaging production data.
-
-## Filesystem hygiene
-
-`.gitignore` excludes `.env`, virtual environments, pytest cache, SQLite/database files, logs, backups, and temporary files. Verify with Git on a checkout:
-
-```bash
-git status --short
-git diff --check
-```
-
-If the deployment directory is not a Git checkout, record that fact rather than claiming Git hygiene was verified.
-
-## Known limitations
-
-- one application process only
-- no durable queue or crash recovery for in-flight tasks
-- live systemd, reboot, resource, and GitLab smoke tests must be executed on the target Linux server
-- AI provider availability depends on authorized external credentials and network access
+GitLab REST API does not support multi-resource atomic transactions across MR description and note endpoints.
+- Sequencing: MR Description is updated first, followed by MR Review Note creation/update.
+- Idempotency: Description updates replace only marked AI sections. Review notes check for existing `<!-- AI_REVIEW_NOTE -->` markers before editing, preventing duplicate notes during retries.

@@ -21,6 +21,8 @@ def load_project_config(project_name: str) -> Dict[str, Any]:
         "max_changed_files": 20,
         "allowed_extensions": [".py", ".js", ".ts", ".json", ".yaml", ".yml", ".md"],
         "blocked_files": [".env", ".env.*", "*.pem", "*.key"],
+        "ai": {"external_providers_allowed": True},
+        "external_providers_allowed": True,
         **config,
     }
 

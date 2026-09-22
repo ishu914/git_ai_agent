@@ -1,5 +1,5 @@
 [Unit]
-Description=GitLab AI Agent
+Description=GitLab AI Agent (Single-Process Production Architecture)
 After=network-online.target
 Wants=network-online.target
 
@@ -12,6 +12,11 @@ EnvironmentFile=/etc/git-ai-reviewer/agent.env
 ExecStart=/opt/git-ai-reviewer/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 Restart=on-failure
 RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+SendSIGKILL=no
+
+# Security Sandboxing
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
@@ -21,7 +26,7 @@ RestrictNamespaces=true
 LockPersonality=true
 TasksMax=64
 MemoryMax=1G
-ReadWritePaths=/var/log/git-ai-reviewer
+ReadWritePaths=/var/log/git-ai-reviewer /opt/git-ai-reviewer/application/data
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 LimitNOFILE=65535
 

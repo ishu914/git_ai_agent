@@ -52,7 +52,18 @@ def mark_event_failed(event_key: str) -> None:
 
 
 def should_skip_duplicate(event_key: str) -> bool:
-    return EVENT_STATES.get(event_key) in {"pending", "processing", "completed"}
+    if EVENT_STATES.get(event_key) in {"pending", "processing", "completed"}:
+        return True
+    try:
+        from app.events.store import EventStore
+        from app.config import get_settings
+        store = EventStore(get_settings().database_path)
+        evt = store.get_by_dedupe_key(event_key)
+        if evt and evt.status in {"pending", "processing", "completed", "PENDING", "PROCESSING", "COMPLETED"}:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def build_mr_context(project_id: str, mr_iid: int, client: GitLabClient) -> Dict[str, Any]:
@@ -170,10 +181,17 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
     if validation["status"] == "fail":
         logger.warning("Validation failed for project %s MR !%s", project_id, mr_iid)
 
+    from app.project_config import get_project_settings
+    proj_path = project_data.get("path_with_namespace") or str(project_id)
+    project_settings = get_project_settings(project_path=proj_path)
+
     ai_orchestrator = AIOrchestrator()
     try:
         log_event("AI_REVIEW_STARTED", level="INFO", event_type="merge_request", result="started", project_id=project_id, mr_iid=mr_iid, webhook_id=event_id)
-        analysis = ai_orchestrator.analyze_mr(project_id, mr_iid, context, validation)
+        try:
+            analysis = ai_orchestrator.analyze_mr(project_id, mr_iid, context, validation, project_settings=project_settings)
+        except TypeError:
+            analysis = ai_orchestrator.analyze_mr(project_id, mr_iid, context, validation)
         analysis = dict(analysis)
         analysis["deterministic_files"] = [
             f"{item['path']} (+{item['additions']} / -{item['deletions']})"

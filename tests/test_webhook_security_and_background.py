@@ -15,6 +15,7 @@ def isolate_webhook_environment(monkeypatch, tmp_path):
     empty_env_file = tmp_path / "empty.env"
     empty_env_file.write_text("", encoding="utf-8")
     monkeypatch.setenv("APP_ENV_FILE", str(empty_env_file))
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "webhook-jobs.sqlite3"))
     monkeypatch.setenv("WORKER_DATABASE_PATH", str(tmp_path / "webhook-jobs.sqlite3"))
     monkeypatch.delenv("GITLAB_WEBHOOK_SIGNING_TOKEN", raising=False)
     monkeypatch.delenv("GITLAB_WEBHOOK_SECRET", raising=False)

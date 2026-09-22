@@ -18,9 +18,13 @@ def isolate_webhook_environment(monkeypatch, tmp_path):
     empty_env_file = tmp_path / "empty.env"
     empty_env_file.write_text("", encoding="utf-8")
     monkeypatch.setenv("APP_ENV_FILE", str(empty_env_file))
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "webhook-jobs.sqlite3"))
     monkeypatch.setenv("WORKER_DATABASE_PATH", str(tmp_path / "webhook-jobs.sqlite3"))
     monkeypatch.delenv("GITLAB_WEBHOOK_SIGNING_TOKEN", raising=False)
     monkeypatch.delenv("GITLAB_WEBHOOK_SECRET", raising=False)
+    mr_processor.EVENT_STATES.clear()
+    yield
+    mr_processor.EVENT_STATES.clear()
 
 
 def _make_signature(signing_token: str, webhook_id: str, timestamp: str, raw_body: bytes) -> str:

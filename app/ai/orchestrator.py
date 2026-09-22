@@ -67,7 +67,11 @@ class AIOrchestrator:
         candidates = client.discover_models(self.settings.groq_model_discovery_cache_ttl_seconds)
         return candidates[: self.settings.groq_model_max_attempts]
 
-    def candidates(self) -> List[AIModelCandidate]:
+    def candidates(self, external_allowed: Optional[bool] = None) -> List[AIModelCandidate]:
+        if external_allowed is None:
+            external_allowed = getattr(self.settings, "ai_external_providers_allowed", True)
+        if not external_allowed:
+            return []
         return [
             candidate
             for candidate in self._openrouter_candidates() + self._groq_candidates()
@@ -203,7 +207,27 @@ class AIOrchestrator:
             log_event("AI_COMMIT_MESSAGE", level="WARNING", result="generation_failed", error_category=type(exc).__name__)
             return select_commit_message(existing, None, policy)
 
-    def analyze_mr(self, project_id: str, mr_iid: int, mr_context: Dict[str, Any], validation: Dict[str, Any]) -> Dict[str, Any]:
+    def analyze_mr(
+        self,
+        project_id: str,
+        mr_iid: int,
+        mr_context: Dict[str, Any],
+        validation: Dict[str, Any],
+        project_settings: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        external_allowed = getattr(self.settings, "ai_external_providers_allowed", True)
+        if project_settings:
+            ai_sec = project_settings.get("ai")
+            if isinstance(ai_sec, dict) and "external_providers_allowed" in ai_sec:
+                external_allowed = bool(ai_sec["external_providers_allowed"])
+            elif "external_providers_allowed" in project_settings:
+                external_allowed = bool(project_settings["external_providers_allowed"])
+
+        if not external_allowed:
+            self.last_failure_reason = "External AI providers prohibited by configuration policy."
+            logger.info("AI analysis skipped for %s !%s: external_providers_allowed=false", project_id, mr_iid)
+            raise AIUnavailableError(self.last_failure_reason)
+
         payload, partial, excluded = build_compact_review_payload(
             mr_context,
             validation,

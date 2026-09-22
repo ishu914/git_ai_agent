@@ -17,7 +17,7 @@ def _as_text_list(value: Any) -> list[str]:
     if isinstance(value, str):
         return [value.strip()] if value.strip() else []
     if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
+        return [str(item).strip() for item in value if str(item).strip() and not isinstance(item, dict)]
     return []
 
 
@@ -29,7 +29,11 @@ def build_ai_section(data: Dict[str, Any]) -> str:
     files_summary = "\n".join(f"- {item}" for item in _as_text_list(data.get("files_summary")))
     review_scope = _as_text(data.get("review_scope"), "full")
     excluded_files = ", ".join(_as_text_list(data.get("excluded_files")))
-    breaking_changes = _as_text(data.get("breaking_changes"), "none identified")
+    raw_breaking_changes = data.get("breaking_changes")
+    if isinstance(raw_breaking_changes, list):
+        breaking_changes = "none identified" if not raw_breaking_changes else "potential"
+    else:
+        breaking_changes = _as_text(raw_breaking_changes, "none identified")
     reviewer_attention = _as_text_list(data.get("reviewer_attention"))
     findings = data.get("findings") or []
     finding_lines = []
@@ -38,10 +42,12 @@ def build_ai_section(data: Dict[str, Any]) -> str:
             continue
         severity = _as_text(finding.get("severity"), "info")
         category = _as_text(finding.get("category"), "info")
+        issue = _as_text(finding.get("issue"), "")
+        if category == severity:
+            category = "info" if severity != "info" else "security" if any(marker in issue.lower() for marker in ("secret", "credential", "token", "password", "access key")) else "info"
         file_name = _as_text(finding.get("file"), "unknown")
         line = finding.get("line")
         location = f"{file_name}:{line}" if isinstance(line, int) and line > 0 else file_name
-        issue = _as_text(finding.get("issue"), "")
         recommendation = _as_text(finding.get("recommendation"), "")
         finding_lines.append(f"- **{severity} / {category}** `{location}` {issue}" + (f" **Recommendation:** {recommendation}" if recommendation else ""))
 

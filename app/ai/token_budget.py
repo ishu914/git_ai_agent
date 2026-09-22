@@ -90,9 +90,10 @@ def build_compact_review_payload(
             excluded.append(f"{path} (truncated)")
 
     file_facts = []
-    for entry in changes:
+    authoritative_files = mr_context.get("changed_files") or []
+    for entry in authoritative_files or changes:
         old_path = str(entry.get("old_path") or "")
-        new_path = str(entry.get("new_path") or "")
+        new_path = str(entry.get("new_path") or entry.get("path") or "")
         file_facts.append({
             "path": new_path or old_path or "unknown",
             "old_path": old_path or None,

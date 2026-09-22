@@ -16,7 +16,7 @@ def render_mr_summary(result: Dict[str, Any]) -> str:
         "change_type": result.get("change_type"),
         "testing": result.get("testing"),
         "risk": result.get("risk"),
-        "files_summary": result.get("files_summary") or result.get("deterministic_files"),
+        "files_summary": result.get("deterministic_files") or result.get("files_summary"),
         "breaking_changes": result.get("breaking_changes"),
         "reviewer_attention": result.get("reviewer_attention"),
         "findings": result.get("findings"),

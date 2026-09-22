@@ -1,335 +1,210 @@
-# Linux deployment guide for the GitLab AI reviewer
+# GitLab AI Agent Production Deployment
 
-This guide documents the safe single-server Linux deployment model for the GitLab AI review service. It is intentionally scoped to the current architecture: a FastAPI receiver, a separate worker process, SQLite durable storage, and environment-driven configuration.
+This is the active deployment model:
 
-## 1. Deployment target and constraints
+- one Linux server
+- one FastAPI/Uvicorn process
+- one systemd service: `git-ai-agent.service`
+- no worker process, queue database, backup timer, or second application service
 
-
-## 2. Production filesystem layout
-
-Example layout:
+## Runtime flow
 
 ```text
-/opt/git-ai-reviewer/
-    application/
-    venv/
-
-/var/lib/git-ai-reviewer/
-    jobs.sqlite3
-
-/var/backups/git-ai-reviewer/
-    jobs.sqlite3.backup
-    jobs.sqlite3.backup.YYYYMMDD-HHMMSS
-
-/etc/git-ai-reviewer/
-    agent.env
-
-/var/log/git-ai-reviewer/
-    (only if file-based logging is explicitly configured)
+GitLab System Hook -> FastAPI -> in-process MR task -> GitLab MR/diff
+  -> deterministic validation -> AI orchestration/fallback
+  -> controlled MR description section and AI review note
 ```
 
-Recommended ownership and permissions:
+The process has no durable queue. In-flight work is lost if the process exits; systemd restarts the service and GitLab may redeliver webhook events according to its own retry policy.
 
-```bash
-sudo mkdir -p /opt/git-ai-reviewer/application /opt/git-ai-reviewer/venv \
-  /var/lib/git-ai-reviewer /var/backups/git-ai-reviewer /etc/git-ai-reviewer /var/log/git-ai-reviewer
+## Prerequisites
 
-sudo chown -R git-ai-reviewer:git-ai-reviewer /opt/git-ai-reviewer /var/lib/git-ai-reviewer /var/backups/git-ai-reviewer /var/log/git-ai-reviewer
-sudo chmod 700 /etc/git-ai-reviewer /var/lib/git-ai-reviewer /var/backups/git-ai-reviewer /var/log/git-ai-reviewer
-sudo chmod 600 /etc/git-ai-reviewer/agent.env
-sudo chmod 700 /opt/git-ai-reviewer /opt/git-ai-reviewer/application /opt/git-ai-reviewer/venv
-```
+- Ubuntu or another supported Linux distribution
+- Python 3.12 with venv support
+- network access to GitLab and configured AI providers
+- a dedicated unprivileged account such as `git-ai-reviewer`
+- a GitLab service account named `gi_ai_code_reviewer` with only the required project/MR permissions
 
-The exact production paths are configurable; the repository must not assume `/home/sam/git_ai_agent` is the deployment location.
-
-## 3. Service user
-
-Create a dedicated Linux service account:
+## Filesystem and service user
 
 ```bash
 sudo useradd --system --home /opt/git-ai-reviewer --no-create-home --shell /usr/sbin/nologin git-ai-reviewer
+sudo install -d -o git-ai-reviewer -g git-ai-reviewer -m 750 /opt/git-ai-reviewer
+sudo install -d -o git-ai-reviewer -g git-ai-reviewer -m 750 /opt/git-ai-reviewer/application
+sudo install -d -o git-ai-reviewer -g git-ai-reviewer -m 750 /opt/git-ai-reviewer/venv
+sudo install -d -o root -g root -m 700 /etc/git-ai-reviewer
+sudo install -d -o git-ai-reviewer -g git-ai-reviewer -m 750 /var/log/git-ai-reviewer
+sudo install -o root -g root -m 600 /dev/null /etc/git-ai-reviewer/agent.env
 ```
 
-Requirements:
+The application user needs read access to the application, virtual environment, and environment file, plus write access only to the configured log directory. The environment file must not be stored in the repository.
 
-
-This user should own the app tree, the SQLite database, and the backup/log directories used by the service.
-
-## 4. Application installation
-
-On the Linux host, clone or pull the repository into the stable application path:
+## Install the application
 
 ```bash
-sudo git clone https://git.example.com/git-ai-reviewer.git /opt/git-ai-reviewer/application
-```
-
-or, for updates:
-
-```bash
-cd /opt/git-ai-reviewer/application
-git pull
-```
-
-The Linux host should not require manual editing of application files after deployment. The code is version-controlled and deployed by Git.
-
-## 5. Python environment
-
-Create and populate a dedicated virtual environment:
-
-```bash
+sudo git clone <repository-url> /opt/git-ai-reviewer/application
 sudo python3.12 -m venv /opt/git-ai-reviewer/venv
 sudo /opt/git-ai-reviewer/venv/bin/pip install --upgrade pip
 sudo /opt/git-ai-reviewer/venv/bin/pip install -r /opt/git-ai-reviewer/application/requirements.txt
+sudo chown -R git-ai-reviewer:git-ai-reviewer /opt/git-ai-reviewer
 ```
 
-Then verify the environment:
+## Environment and secrets
 
-```bash
-/opt/git-ai-reviewer/venv/bin/python -V
-/opt/git-ai-reviewer/venv/bin/python -m pytest -q
+Populate `/etc/git-ai-reviewer/agent.env` with the required values:
+
+```text
+GITLAB_URL=http://gitlab.internal
+GITLAB_TOKEN=<service-account-token>
+GITLAB_AI_USERNAME=gi_ai_code_reviewer
+GITLAB_WEBHOOK_SIGNING_TOKEN=whsec_<signing-token>
+OPENROUTER_API_KEY=<optional-authorized-key>
+OPENROUTER_MODEL=<configured-model>
+OPENROUTER_ENABLED=true
+GROQ_API_KEY=<optional-authorized-key>
+GROQ_ENABLED=true
+AI_AGENT_HOST=0.0.0.0
+AI_AGENT_PORT=8000
 ```
 
-Do not rely on global Python packages. Dependency changes must be deliberate and validated in the same venv.
-
-## 6. Environment file
-
-Create a service-owned environment file outside Git:
-
 ```bash
-sudo install -d -o root -g root -m 700 /etc/git-ai-reviewer
-sudo touch /etc/git-ai-reviewer/agent.env
 sudo chown root:root /etc/git-ai-reviewer/agent.env
 sudo chmod 600 /etc/git-ai-reviewer/agent.env
 ```
 
-Populate it with the required environment variables, for example:
+Never put tokens in the unit file, source, YAML, README, tests, logs, or Git. Do not print the environment file during diagnostics. Optional providers such as AECO_AI must not make startup fail when absent.
+
+## systemd installation
+
+Install [deploy/systemd/git-ai-agent.service](../deploy/systemd/git-ai-agent.service):
 
 ```bash
-GITLAB_URL=http://192.168.2.86
-GITLAB_TOKEN=...
-GITLAB_AI_USERNAME=gi_ai_code_reviewer
-GITLAB_WEBHOOK_SIGNING_TOKEN=whsec_...
-OPENROUTER_API_KEY=...
-OPENROUTER_MODEL=openai/gpt-4o-mini
-OPENROUTER_ENABLED=true
-GROQ_API_KEY=...
-GROQ_ENABLED=true
-WORKER_DATABASE_PATH=/var/lib/git-ai-reviewer/jobs.sqlite3
-AI_AGENT_HOST=0.0.0.0
-AI_AGENT_PORT=8000
-WORKER_ENABLED=true
-WORKER_CONCURRENCY=2
-AI_MAX_CONCURRENT_REVIEWS=2
-WORKER_MAX_ATTEMPTS=3
-WORKER_LEASE_SECONDS=900
-WORKER_JOB_RETENTION_DAYS=90
-```
-
-Notes:
-
-
-## 7. systemd service installation
-
-The repo includes service templates under [deploy/systemd](../deploy/systemd). Copy them to `/etc/systemd/system/` on the Linux host and review the paths before enabling them.
-
-Example:
-
-```bash
-sudo cp /opt/git-ai-reviewer/application/deploy/systemd/git-ai-web.service /etc/systemd/system/
-sudo cp /opt/git-ai-reviewer/application/deploy/systemd/git-ai-worker.service /etc/systemd/system/
-sudo cp /opt/git-ai-reviewer/application/deploy/systemd/git-ai-backup.service /etc/systemd/system/
-sudo cp /opt/git-ai-reviewer/application/deploy/systemd/git-ai-backup.timer /etc/systemd/system/
-sudo cp /opt/git-ai-reviewer/application/deploy/systemd/git-ai-retention.service /etc/systemd/system/
-sudo cp /opt/git-ai-reviewer/application/deploy/systemd/git-ai-retention.timer /etc/systemd/system/
-```
-
-Then reload and enable:
-
-```bash
+sudo cp /opt/git-ai-reviewer/application/deploy/systemd/git-ai-agent.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now git-ai-web.service
-sudo systemctl enable --now git-ai-worker.service
-sudo systemctl enable --now git-ai-backup.timer
-sudo systemctl enable --now git-ai-retention.timer
+sudo systemctl enable --now git-ai-agent.service
 ```
 
-## 8. Service behavior
+The unit directly executes the production virtual environment; activation is not required:
 
-### Receiver service
-
-The web receiver is responsible for:
-
-
-It must not run long AI analysis or block on external provider calls.
-
-### Worker service
-
-The worker is responsible for:
-
-
-The worker depends on the durable queue, not on in-memory state from the receiver.
-
-## 9. systemd hardening
-
-The provided unit templates use conservative process hardening where compatible with the application:
-
-
-These settings are intentionally limited to what the service requires. They do not disable GitLab access, SQLite access, or required outbound provider connectivity.
-
-## 10. SQLite deployment model
-
-The queue uses SQLite with WAL mode and durable transactional writes. The deployment must preserve that model.
-
-Production requirements:
-
-
-## 11. Backup and restore
-
-The project already includes backup capability:
-
-```bash
-python -m app.worker.runner --backup /var/backups/git-ai-reviewer/jobs.sqlite3.backup
+```text
+/opt/git-ai-reviewer/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Recommended scheduling model:
+It uses `Restart=on-failure` with a five-second delay, starts after `network-online.target`, runs as `git-ai-reviewer`, and does not configure multiple Uvicorn workers.
 
+The unit uses `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome`, `RestrictSUIDSGID`, `RestrictNamespaces`, `LockPersonality`, `TasksMax=64`, and `MemoryMax=1G`. Outbound IPv4/IPv6/Unix networking remains allowed for GitLab and AI provider access. Adjust the memory limit only after observing real workload behavior.
 
-Example timer schedule: daily backup, weekly retention cleanup.
-
-## 12. Retention cleanup
-
-The project provides:
+## Service operations
 
 ```bash
-python -m app.worker.runner --cleanup-retention
+sudo systemctl status git-ai-agent.service
+sudo systemctl restart git-ai-agent.service
+sudo systemctl stop git-ai-agent.service
+sudo systemctl start git-ai-agent.service
+journalctl -u git-ai-agent.service -f
+journalctl -u git-ai-agent.service --no-pager -n 100
 ```
 
-This must be scheduled externally and must not run on every webhook request. It preserves the Phase 2 behavior: completed, obsolete, or dead-letter jobs older than the configured retention window are deleted; active, pending, processing, and retryable jobs remain intact.
+Uvicorn receives normal systemd termination signals. There is no durable queue or crash recovery for in-flight MR work.
 
-## 13. Logging and rotation
+## GitLab System Hook
 
-The project uses structured logging via `app.observability`. The simplest and most compatible Linux model is journald-backed logging via systemd. That keeps log capture with the service and avoids the maintenance burden of another logging system.
+Configure the GitLab System Hook for Merge Request events at:
 
-If journald is used:
-
-
-If file-based logging is introduced later, configure logrotate to rotate and compress logs while preserving restricted permissions.
-
-## 14. Network binding and firewall
-
-The service currently uses `uvicorn app.main:app --host 0.0.0.0 --port 8000` in the default config. In a single-server internal deployment, it is often reasonable to keep the listener bound to `0.0.0.0` only if the firewall restricts access to the GitLab server or required reverse proxy.
-
-Recommended firewall posture:
-
-
-This is a deployment policy decision and must be enforced by the Linux host firewall.
-
-## 15. Internal TLS and reverse proxy
-
-The current setup uses `http://192.168.2.86`, matching the current internal GitLab URL. This does not require a public TLS redesign during the current phase.
-
-A future internal TLS option can sit in front of the AI agent, but it must not break webhook signature verification. If a reverse proxy terminates TLS, the proxy must preserve the raw request body and the webhook signing headers at the time the service validates the signature.
-
-## 16. Health, readiness, and metrics exposure
-
-The application exposes:
-
-
-These endpoints should remain internal and not be made public without clear reason. They must not include secrets, API keys, raw GitLab content, or webhook signing tokens.
-
-Operational meaning:
-
-
-## 17. Safe startup order
-
-The startup sequence should be:
-
-1. validate configuration
-2. ensure database directory is present and writable
-3. start receiver service
-4. start worker service
-5. allow worker to recover expired leases on startup
-6. resume queue processing
-
-The receiver must not depend on the worker being alive in order to accept and persist valid webhook jobs. The worker must recover pending jobs after a restart.
-
-## 18. Restart and graceful shutdown behavior
-
-The worker already includes graceful shutdown logic with SIGINT/SIGTERM handling. The Linux deployment should preserve this behavior:
-
-
-The receiver can restart independently. The worker restart must recover queued jobs and expired leases without data loss.
-
-## 19. Update and rollback workflow
-
-### Standard update workflow
-
-On Windows:
-
-```bash
-# code changes, tests, commit, push
-python -m pytest -q
-git add .
-git commit -m "Update deployment configuration"
-git push
+```text
+https://<internal-host>/webhook/gitlab
 ```
 
-On Linux:
+Configure the same signing token in `GITLAB_WEBHOOK_SIGNING_TOKEN`. The endpoint validates the raw body, webhook ID, signature, and timestamp before scheduling an in-process task. Invalid or stale events must not reach AI processing.
+
+## Health, readiness, and metrics
 
 ```bash
-cd /opt/git-ai-reviewer/application
-git pull
-/opt/git-ai-reviewer/venv/bin/python -m pytest -q
-sudo systemctl restart git-ai-web.service
-sudo systemctl restart git-ai-worker.service
 curl -fsS http://127.0.0.1:8000/health
 curl -fsS http://127.0.0.1:8000/ready
 curl -fsS http://127.0.0.1:8000/metrics
 ```
 
-### Rollback workflow
+`/health` checks process liveness without calling AI. `/ready` reports the single-process runtime state. `/metrics` exposes bounded operational counters without secrets, source, complete diffs, prompts, or raw provider responses.
 
+## Logging and failure handling
 
-Database migrations are intentionally kept minimal and compatibility-focused where practical.
+Structured logs identify webhook receipt/acceptance, processing stages, provider/model selection, fallbacks, GitLab failures, AI failures, description updates, review notes, and commit-message preservation/generation. Secret values, authorization headers, complete sensitive diffs, and credentials must remain redacted.
 
-## 20. Smoke test plan
+GitLab and AI timeouts are bounded by the existing 30-second client timeouts and retry limits. Provider failures are isolated to the MR task; no fake review is written. GitLab failures are reported safely and do not grant approval, merge, push, branch, user, or permission capabilities.
 
-Use a dedicated test GitLab project/MR. Do not use production-sensitive repositories for the first deployment test.
+Journald is the logging mechanism. Configure host-level journal retention/size limits according to the server policy; do not add a second application logging service.
 
-1. GET `/health`
-2. GET `/ready`
-3. GET `/metrics`
-4. inspect worker status
-5. inspect queue status
-6. send one GitLab MR event
-7. verify the webhook is accepted
-8. verify a job is created in SQLite
-9. verify the worker claims the job
-10. verify AI processing runs or returns an explicit unavailable status
-11. verify MR description update/notes behavior
-12. verify job reaches `COMPLETED`
-13. verify metrics increment and logs remain structured
-14. verify no secret values appear in logs
+## Update procedure
 
-## 21. Failure tests to document before production
+```bash
+cd /opt/git-ai-reviewer/application
+git fetch --prune
+git pull --ff-only
+/opt/git-ai-reviewer/venv/bin/pip install -r requirements.txt
+/opt/git-ai-reviewer/venv/bin/python -m pytest -q
+sudo systemctl restart git-ai-agent.service
+curl -fsS http://127.0.0.1:8000/health
+curl -fsS http://127.0.0.1:8000/ready
+```
 
-Before production deployment, the operator should test or at least simulate:
+Perform a controlled smoke test after restart and inspect the journal for processing completion.
 
+## Rollback procedure
 
-These tests must be done against a non-production project or isolated environment.
+```bash
+cd /opt/git-ai-reviewer/application
+git log --oneline -5
+git checkout <known-good-commit>
+/opt/git-ai-reviewer/venv/bin/python -m pytest -q
+sudo systemctl restart git-ai-agent.service
+curl -fsS http://127.0.0.1:8000/health
+curl -fsS http://127.0.0.1:8000/ready
+```
 
-## 22. Dependency security and CI
+Do not roll back by copying secrets or runtime files into the repository.
 
-The project still has dependency vulnerability scanning as remaining work. The goal is deliberate review of known issues, not blanket upgrades. If GitHub Actions is in use, integrate the scan into the existing CI flow rather than creating a separate deployment-heavy system.
+## Reboot and smoke-test procedure
 
-## 23. Production checklist
+On an approved non-production Linux host:
 
-Before considering the deployment operationally ready:
+```bash
+sudo systemctl enable --now git-ai-agent.service
+systemctl is-active git-ai-agent.service
+curl -fsS http://127.0.0.1:8000/health
+curl -fsS http://127.0.0.1:8000/ready
+sudo reboot
+```
 
+After reboot:
 
-## 24. Important Linux verification items
+```bash
+systemctl is-active git-ai-agent.service
+curl -fsS http://127.0.0.1:8000/health
+curl -fsS http://127.0.0.1:8000/ready
+curl -fsS http://127.0.0.1:8000/metrics
+```
 
-The following items must be verified on the actual Linux host and are deliberately not assumed by the repository itself:
+Then send one harmless controlled MR and verify the System Hook, in-process processing, deterministic validation, AI gate/provider, description update, review note, correct file statistics, no duplicate AI section, and no secret exposure.
 
+## Concurrency and failure injection
 
-This deployment work is complete only when those Linux-specific checks pass on the target environment.
+Use a non-production project and mocks where possible. Trigger multiple webhook events close together and verify the HTTP process remains responsive, each MR remains isolated, and duplicate events do not create uncontrolled notes or sections. Exercise invalid signatures, malformed payloads, GitLab 401/403/404/5xx/timeouts, provider timeout/429/malformed/incomplete responses, and missing optional provider configuration without damaging production data.
+
+## Filesystem hygiene
+
+`.gitignore` excludes `.env`, virtual environments, pytest cache, SQLite/database files, logs, backups, and temporary files. Verify with Git on a checkout:
+
+```bash
+git status --short
+git diff --check
+```
+
+If the deployment directory is not a Git checkout, record that fact rather than claiming Git hygiene was verified.
+
+## Known limitations
+
+- one application process only
+- no durable queue or crash recovery for in-flight tasks
+- live systemd, reboot, resource, and GitLab smoke tests must be executed on the target Linux server
+- AI provider availability depends on authorized external credentials and network access

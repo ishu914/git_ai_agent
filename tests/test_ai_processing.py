@@ -104,6 +104,62 @@ def test_render_summary_has_no_artificial_finding_for_trivial_change():
     assert "No actionable findings identified." in rendered
 
 
+def test_gitlab_diff_statistics_are_deterministic_and_preserve_explicit_zeroes():
+    class FakeGitLabClient:
+        def get_project(self, project_id):
+            return {"id": project_id}
+
+        def get_merge_request(self, project_id, mr_iid):
+            return {"description": ""}
+
+        def get_merge_request_changes(self, project_id, mr_iid):
+            return {"changes": [
+                {"new_path": "simple.py", "diff": "@@ -1 +1,3 @@\n line\n+added\n+another"},
+                {"new_path": "empty.py", "diff": "", "additions": 0, "deletions": 0},
+            ]}
+
+        def get_merge_request_commits(self, project_id, mr_iid):
+            return []
+
+        def get_merge_request_approvals(self, project_id, mr_iid):
+            return {}
+
+    context = mr_processor.build_mr_context("1", 2, FakeGitLabClient())
+
+    assert context["changed_files"] == [
+        {"path": "simple.py", "status": "modified", "additions": 2, "deletions": 0, "old_path": None, "binary": False},
+        {"path": "empty.py", "status": "modified", "additions": 0, "deletions": 0, "old_path": None, "binary": False},
+    ]
+
+
+def test_live_output_normalizes_breaking_changes_file_and_related_credentials():
+    normalized = normalize_review_result({
+        "summary": "Hardcoded credentials are present.",
+        "risk": "high",
+        "breaking_changes": [],
+        "testing": "Run tests after removing hardcoded values.",
+        "findings": [
+            {"severity": "info", "issue": "Hardcoded AWS_ACCESS_KEY_ID AKIA1234567890123456 and AWS_SECRET_ACCESS_KEY"},
+            {"severity": "info", "issue": "Hardcoded GITHUB_TOKEN"},
+        ],
+    }, changed_files=[{"path": "simple.py", "additions": 2, "deletions": 0}])
+    rendered = render_mr_summary({
+        **normalized,
+        "deterministic_files": ["simple.py (+2 / -0)"],
+    })
+
+    assert normalized["breaking_changes"] == "none identified"
+    assert len(normalized["findings"]) == 1
+    assert normalized["findings"][0]["file"] == "simple.py"
+    assert normalized["findings"][0]["category"] == "security"
+    assert "Breaking Changes\nnone identified" in rendered
+    assert "**info / info**" not in rendered
+    assert "`simple.py`" in rendered
+    assert "No credential remediation is evidenced" in rendered
+    assert "AWS_ACCESS_KEY_ID" in rendered
+    assert "AKIA1234567890123456" not in rendered
+
+
 def test_description_section_preserves_developer_content():
     original = "Developer content\n\n" + build_ai_section({"summary": "old"}) + "\n\nMore developer content"
     replacement = build_ai_section({"summary": "new"})

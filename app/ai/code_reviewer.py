@@ -5,7 +5,7 @@ from urllib.parse import unquote
 
 from app.ai.client import OpenRouterClient
 from app.ai.prompts import build_messages_for_review
-from app.ai.token_budget import deduplicate_findings
+from app.ai.token_budget import deduplicate_findings, redact_sensitive_text
 
 logger = logging.getLogger(__name__)
 ALLOWED_STATUSES = {"reviewed", "unavailable", "pass", "warn", "fail"}
@@ -15,11 +15,39 @@ ALLOWED_RISKS = {"low", "medium", "high", "unknown"}
 ALLOWED_BREAKING = {"none identified", "potential", "confirmed", "unknown"}
 
 
-def _safe_finding(value: Any) -> Dict[str, Any] | None:
+def _infer_category(issue: str) -> str:
+    lowered = issue.lower()
+    if any(marker in lowered for marker in ("secret", "credential", "token", "password", "api key", "access key")):
+        return "security"
+    if any(marker in lowered for marker in ("crash", "exception", "race", "retry", "timeout")):
+        return "reliability"
+    if any(marker in lowered for marker in ("slow", "performance", "query cost")):
+        return "performance"
+    return "info"
+
+
+def _group_related_findings(findings: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+    grouped: list[Dict[str, Any]] = []
+    security_groups: Dict[str, Dict[str, Any]] = {}
+    credential_markers = ("secret", "credential", "token", "password", "access key", "api key")
+    for finding in findings:
+        if finding["category"] == "security" and any(marker in finding["issue"].lower() for marker in credential_markers):
+            key = finding["file"]
+            if key in security_groups:
+                security_groups[key]["issue"] += f"; {finding['issue']}"
+                if finding.get("recommendation") and finding["recommendation"] not in security_groups[key]["recommendation"]:
+                    security_groups[key]["recommendation"] += f" {finding['recommendation']}"
+                continue
+            security_groups[key] = finding
+        grouped.append(finding)
+    return grouped
+
+
+def _safe_finding(value: Any, fallback_file: str = "") -> Dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
     issue = value.get("issue") or value.get("message") or value.get("description")
-    file_name = value.get("file") or value.get("path")
+    file_name = value.get("file") or value.get("path") or fallback_file
     if not isinstance(issue, str) or not issue.strip() or not isinstance(file_name, str) or not file_name.strip():
         return None
     normalized_file = unquote(file_name.strip()).replace("\\", "/")
@@ -39,18 +67,20 @@ def _safe_finding(value: Any) -> Dict[str, Any] | None:
     line = value.get("line")
     if line is not None and (isinstance(line, bool) or not isinstance(line, int) or line < 1):
         line = None
+    raw_category = value.get("category")
+    category = str(raw_category).lower().strip() if raw_category else _infer_category(issue)
     return {
         "severity": severity,
-        "category": str(value.get("category") or "info").lower().strip()[:40],
+        "category": category[:40],
         "file": normalized_file[:300],
         "line": line,
-        "issue": issue.strip()[:1000],
-        "recommendation": str(value.get("recommendation") or "").strip()[:1000],
+        "issue": redact_sensitive_text(issue.strip())[:1000],
+        "recommendation": redact_sensitive_text(str(value.get("recommendation") or "").strip())[:1000],
         "confidence": str(value.get("confidence") or "").lower().strip()[:20],
     }
 
 
-def normalize_review_result(result: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_review_result(result: Dict[str, Any], changed_files: list[Dict[str, Any]] | None = None) -> Dict[str, Any]:
     if not isinstance(result, dict) or not result.get("summary"):
         return {"status": "unavailable", "summary": "AI review could not be completed.", "findings": []}
     findings = result.get("findings", [])
@@ -58,14 +88,23 @@ def normalize_review_result(result: Dict[str, Any]) -> Dict[str, Any]:
         findings = [findings]
     if not isinstance(findings, list):
         findings = []
-    findings = [finding for finding in (_safe_finding(item) for item in findings) if finding is not None]
-    findings = deduplicate_findings(findings)
+    fallback_file = ""
+    if len(changed_files or []) == 1:
+        fallback_file = str(changed_files[0].get("path") or "")
+    findings = [finding for finding in (_safe_finding(item, fallback_file) for item in findings) if finding is not None]
+    findings = _group_related_findings(deduplicate_findings(findings))
     status = str(result.get("status") or "reviewed").lower().strip()
     if status not in ALLOWED_STATUSES:
         status = "reviewed"
     change_type = str(result.get("change_type") or "unknown").lower().strip()
     risk = str(result.get("risk") or "unknown").lower().strip()
-    breaking_changes = str(result.get("breaking_changes") or "unknown").lower().strip()
+    raw_breaking = result.get("breaking_changes")
+    if isinstance(raw_breaking, list):
+        raw_breaking = "none identified" if not raw_breaking else "potential"
+    breaking_changes = str(raw_breaking or "unknown").lower().strip()
+    testing = str(result.get("testing") or "").strip()
+    if any(finding.get("category") == "security" for finding in findings) and "remov" in testing.lower() and not any(int(item.get("deletions") or 0) > 0 for item in (changed_files or [])):
+        testing = "No credential remediation is evidenced by the available diff; verify removal and rotate exposed credentials."
     return {
         "status": status,
         "summary": str(result["summary"]).strip(),
@@ -74,7 +113,7 @@ def normalize_review_result(result: Dict[str, Any]) -> Dict[str, Any]:
         "excluded_files": result.get("excluded_files", []),
         "breaking_changes": breaking_changes if breaking_changes in ALLOWED_BREAKING else "unknown",
         "reviewer_attention": result.get("reviewer_attention", []),
-        "testing": result.get("testing", ""),
+        "testing": testing,
         "risk": risk if risk in ALLOWED_RISKS else "unknown",
         "change_type": change_type if change_type in ALLOWED_CHANGE_TYPES else "unknown",
     }

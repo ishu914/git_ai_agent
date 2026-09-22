@@ -15,6 +15,26 @@ EVENT_STATES: Dict[str, str] = {}
 AI_REVIEW_NOTE_MARKER = "<!-- AI_REVIEW_NOTE -->"
 
 
+def _diff_statistics(diff: Any) -> tuple[int, int]:
+    additions = 0
+    deletions = 0
+    for line in str(diff or "").splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            additions += 1
+        elif line.startswith("-"):
+            deletions += 1
+    return additions, deletions
+
+
+def _file_statistics(item: Dict[str, Any]) -> tuple[int, int]:
+    diff_additions, diff_deletions = _diff_statistics(item.get("diff"))
+    additions = int(item["additions"]) if "additions" in item and item.get("additions") is not None else diff_additions
+    deletions = int(item["deletions"]) if "deletions" in item and item.get("deletions") is not None else diff_deletions
+    return additions, deletions
+
+
 def mark_event_pending(event_key: str) -> None:
     EVENT_STATES[event_key] = "pending"
 
@@ -45,11 +65,14 @@ def build_mr_context(project_id: str, mr_iid: int, client: GitLabClient) -> Dict
     changed_files = []
     for item in changes.get("changes", []):
         file_path = item.get("new_path") or item.get("old_path") or "unknown"
+        additions, deletions = _file_statistics(item)
         changed_files.append({
             "path": file_path,
             "status": item.get("new_file") and "added" or item.get("deleted_file") and "deleted" or "modified",
-            "additions": item.get("additions", 0),
-            "deletions": item.get("deletions", 0),
+            "additions": additions,
+            "deletions": deletions,
+            "old_path": item.get("old_path"),
+            "binary": bool(item.get("binary") or item.get("is_binary")),
         })
 
     total_additions = sum(int(entry.get("additions", 0)) for entry in changed_files)
@@ -157,8 +180,16 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
             for item in context["changed_files"]
         ]
         log_event("AI_REVIEW_COMPLETED", level="INFO", event_type="merge_request", result="completed", project_id=project_id, mr_iid=mr_iid, webhook_id=event_id, provider=analysis.get("provider"), model=analysis.get("model"))
+        ai_review = normalize_review_result(analysis, changed_files=context["changed_files"])
+        analysis.update({
+            "testing": ai_review.get("testing", ""),
+            "breaking_changes": ai_review.get("breaking_changes", "unknown"),
+            "findings": ai_review.get("findings", []),
+            "risk": ai_review.get("risk", "unknown"),
+            "change_type": ai_review.get("change_type", "unknown"),
+            "reviewer_attention": ai_review.get("reviewer_attention", []),
+        })
         ai_summary = render_mr_summary(analysis)
-        ai_review = normalize_review_result(analysis)
     except Exception as exc:
         logger.warning(
             "AI analysis unavailable: project_id=%s mr_iid=%s error=%s",

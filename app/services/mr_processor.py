@@ -6,6 +6,7 @@ from app.ai.mr_summary import render_mr_summary
 from app.ai.orchestrator import AIOrchestrator
 from app.config import get_settings
 from app.gitlab.client import GitLabClient
+from app.observability import log_event
 from app.services.description_manager import build_ai_unavailable_section, replace_ai_section
 from app.validation.engine import ValidationEngine
 
@@ -113,6 +114,7 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
     mr_iid = int(mr_data.get("iid") or mr_data.get("merge_request_iid") or 0)
     action = mr_data.get("action") or event_data.get("event_type") or "updated"
     event_id = event_data.get("webhook_id") or event_data.get("event_id") or "background"
+    dedupe_key = event_data.get("_dedupe_key") or f"{project_id}:{mr_iid}:{action}"
 
     if not project_id or not mr_iid:
         raise ValueError("GitLab event is missing project ID or MR IID")
@@ -125,13 +127,16 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
         action,
     )
 
-    dedupe_key = f"{project_id}:{mr_iid}:{action}"
     mark_event_processing(dedupe_key)
+    log_event("PROCESSING_STARTED", level="INFO", event_type="merge_request", result="started", project_id=project_id, mr_iid=mr_iid, webhook_id=event_id)
 
     settings = get_settings()
     client = GitLabClient(base_url=settings.gitlab_url, token=settings.gitlab_token)
+    log_event("GITLAB_MR_FETCH", level="INFO", event_type="merge_request", result="started", project_id=project_id, mr_iid=mr_iid, webhook_id=event_id)
     context = build_mr_context(project_id, mr_iid, client)
+    log_event("GITLAB_DIFF_FETCH", level="INFO", event_type="merge_request", result="completed", project_id=project_id, mr_iid=mr_iid, webhook_id=event_id)
     validation = ValidationEngine().validate(context)
+    log_event("VALIDATION_COMPLETE", level="INFO", event_type="merge_request", result=validation["status"], project_id=project_id, mr_iid=mr_iid, webhook_id=event_id)
     logger.info("Validation status for %s/%s: %s", project_id, mr_iid, validation["status"])
 
     if validation["status"] == "fail":
@@ -139,7 +144,9 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
 
     ai_orchestrator = AIOrchestrator()
     try:
+        log_event("AI_REVIEW_STARTED", level="INFO", event_type="merge_request", result="started", project_id=project_id, mr_iid=mr_iid, webhook_id=event_id)
         analysis = ai_orchestrator.analyze_mr(project_id, mr_iid, context, validation)
+        log_event("AI_REVIEW_COMPLETED", level="INFO", event_type="merge_request", result="completed", project_id=project_id, mr_iid=mr_iid, webhook_id=event_id, provider=analysis.get("provider"), model=analysis.get("model"))
         ai_summary = render_mr_summary(analysis)
         ai_review = normalize_review_result(analysis)
     except Exception as exc:
@@ -165,9 +172,11 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
     updated_description = replace_ai_section(description, description_content)
     if updated_description != description:
         client.update_merge_request_description(project_id, mr_iid, updated_description)
+        log_event("DESCRIPTION_UPDATE", level="INFO", event_type="merge_request", result="completed", project_id=project_id, mr_iid=mr_iid, webhook_id=event_id)
         logger.info("MR description updated for %s !%s", project_id, mr_iid)
 
     _publish_ai_review(client, project_id, mr_iid, ai_review)
+    log_event("REVIEW_NOTE", level="INFO", event_type="merge_request", result=ai_review.get("status"), project_id=project_id, mr_iid=mr_iid, webhook_id=event_id)
 
     status = {
         "project_id": project_id,
@@ -179,4 +188,5 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
         "review": ai_review,
     }
     mark_event_completed(dedupe_key)
+    log_event("PROCESSING_COMPLETED", level="INFO", event_type="merge_request", result="completed", project_id=project_id, mr_iid=mr_iid, webhook_id=event_id)
     return status

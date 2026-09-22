@@ -4,12 +4,6 @@ This guide documents the safe single-server Linux deployment model for the GitLa
 
 ## 1. Deployment target and constraints
 
-- Linux target: Ubuntu 24.04
-- Python: 3.12.x
-- Single server model: GitLab and AI agent share the same private network/host
-- Application source is version-controlled on Windows and pulled to Linux via Git
-- Real secrets remain outside the repository in a service-owned environment file
-- No PostgreSQL migration, no Kubernetes, no dashboard stack, and no new AI capabilities are introduced in this phase
 
 ## 2. Production filesystem layout
 
@@ -58,11 +52,6 @@ sudo useradd --system --home /opt/git-ai-reviewer --no-create-home --shell /usr/
 
 Requirements:
 
-- no interactive login
-- no shell access
-- no root privileges
-- access limited to required application directory, database directory, backup directory, and log directory
-- no access to unrelated files or directories
 
 This user should own the app tree, the SQLite database, and the backup/log directories used by the service.
 
@@ -138,10 +127,6 @@ WORKER_JOB_RETENTION_DAYS=90
 
 Notes:
 
-- This file is not tracked in Git.
-- It must not be web-accessible.
-- It must not be logged by the application.
-- It must not be copied into the repo or committed.
 
 ## 7. systemd service installation
 
@@ -174,11 +159,6 @@ sudo systemctl enable --now git-ai-retention.timer
 
 The web receiver is responsible for:
 
-- accepting GitLab webhook requests
-- validating signature/timestamps
-- rejecting irrelevant or duplicate events
-- creating durable SQLite jobs
-- serving `/health`, `/ready`, and `/metrics`
 
 It must not run long AI analysis or block on external provider calls.
 
@@ -186,14 +166,6 @@ It must not run long AI analysis or block on external provider calls.
 
 The worker is responsible for:
 
-- claiming queue items
-- recovering expired leases
-- processing GitLab MR state
-- running deterministic validation
-- executing AI review if appropriate
-- updating MR notes and description sections
-- retrying transient failures
-- preserving dead-letter records for failed jobs
 
 The worker depends on the durable queue, not on in-memory state from the receiver.
 
@@ -201,13 +173,6 @@ The worker depends on the durable queue, not on in-memory state from the receive
 
 The provided unit templates use conservative process hardening where compatible with the application:
 
-- `NoNewPrivileges=true` — blocks privilege escalation
-- `PrivateTmp=true` — prevents temp-directory leakage
-- `ProtectSystem=strict` — makes the filesystem read-only outside the explicitly writable paths
-- `ProtectHome=true` — prevents unintended access to user home directories
-- `ReadWritePaths=/var/lib/git-ai-reviewer /var/log/git-ai-reviewer` — allows the service to write to required application data directories
-- `RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX` — limits networking to standard IP and Unix sockets
-- `LimitNOFILE=65535` — allows a healthy number of file descriptors for the web service and worker
 
 These settings are intentionally limited to what the service requires. They do not disable GitLab access, SQLite access, or required outbound provider connectivity.
 
@@ -217,13 +182,6 @@ The queue uses SQLite with WAL mode and durable transactional writes. The deploy
 
 Production requirements:
 
-- database stored under `/var/lib/git-ai-reviewer` or another service-owned directory
-- parent directory owner-only permissions
-- database file owner-only permissions
-- WAL mode remains enabled
-- database is not inside the repository
-- database is not web-accessible
-- backups are stored under `/var/backups/git-ai-reviewer` and kept separate from the application directory
 
 ## 11. Backup and restore
 
@@ -235,11 +193,6 @@ python -m app.worker.runner --backup /var/backups/git-ai-reviewer/jobs.sqlite3.b
 
 Recommended scheduling model:
 
-- systemd timer is preferred because it is explicit and easy to manage on a single Linux server
-- keep backups in a separate backup directory with restrictive permissions
-- fail visibly if a backup command fails
-- retain multiple valid snapshots and do not delete backups blindly
-- test a restore process in a non-production copy before relying on it for recovery
 
 Example timer schedule: daily backup, weekly retention cleanup.
 
@@ -259,10 +212,6 @@ The project uses structured logging via `app.observability`. The simplest and mo
 
 If journald is used:
 
-- set storage to a bounded size under systemd journal settings
-- use a retention policy suitable for a single-server deployment
-- ensure secrets remain redacted from log output
-- keep logs readable by the service account only if file-based logs are used
 
 If file-based logging is introduced later, configure logrotate to rotate and compress logs while preserving restricted permissions.
 
@@ -272,11 +221,6 @@ The service currently uses `uvicorn app.main:app --host 0.0.0.0 --port 8000` in 
 
 Recommended firewall posture:
 
-- allow inbound port `8000` only from the GitLab host or an approved reverse proxy
-- keep `/webhook/gitlab` accessible only to trusted clients
-- restrict `/metrics` and `/health` to trusted internal systems if remote visibility is not needed
-- allow outbound egress to GitLab, OpenRouter, and Groq as required by the environment
-- avoid opening port `8000` to the entire network
 
 This is a deployment policy decision and must be enforced by the Linux host firewall.
 
@@ -290,17 +234,11 @@ A future internal TLS option can sit in front of the AI agent, but it must not b
 
 The application exposes:
 
-- `/health`
-- `/ready`
-- `/metrics`
 
 These endpoints should remain internal and not be made public without clear reason. They must not include secrets, API keys, raw GitLab content, or webhook signing tokens.
 
 Operational meaning:
 
-- `/health`: process is up
-- `/ready`: queue store can initialize and the service is configured to run
-- `/metrics`: structured counters and gauges without secret-bearing payloads
 
 ## 17. Safe startup order
 
@@ -319,10 +257,6 @@ The receiver must not depend on the worker being alive in order to accept and pe
 
 The worker already includes graceful shutdown logic with SIGINT/SIGTERM handling. The Linux deployment should preserve this behavior:
 
-- service should stop accepting new claims before exiting
-- active jobs should finish if possible
-- the worker should exit cleanly
-- systemd should use a reasonable stop timeout rather than force-killing the process immediately
 
 The receiver can restart independently. The worker restart must recover queued jobs and expired leases without data loss.
 
@@ -355,12 +289,6 @@ curl -fsS http://127.0.0.1:8000/metrics
 
 ### Rollback workflow
 
-- identify the last known-good Git commit
-- stop or restart the services if necessary
-- check out the previous known-good version
-- reinstall dependencies if the environment changed
-- verify health/readiness and queue behavior
-- avoid rolling back the SQLite schema unless a tested rollback path exists
 
 Database migrations are intentionally kept minimal and compatibility-focused where practical.
 
@@ -387,16 +315,6 @@ Use a dedicated test GitLab project/MR. Do not use production-sensitive reposito
 
 Before production deployment, the operator should test or at least simulate:
 
-- worker restart recovery
-- receiver restart recovery
-- temporary provider failure
-- temporary GitLab failure
-- duplicate webhook rejection
-- expired lease recovery
-- dead-letter job handling
-- backup failure behavior
-- database unavailable behavior
-- disk-space alerting and backup failures
 
 These tests must be done against a non-production project or isolated environment.
 
@@ -408,30 +326,10 @@ The project still has dependency vulnerability scanning as remaining work. The g
 
 Before considering the deployment operationally ready:
 
-- service user created
-- directories created with correct ownership and permissions
-- environment file exists outside Git and has restricted permissions
-- Python venv created and dependencies installed from `requirements.txt`
-- systemd units reviewed and installed
-- database directory is writable by the service user
-- backup path is separate from the application directory
-- queue and worker restart behavior validated
-- health/readiness/metrics endpoints working
-- GitLab webhook signature validation remains intact
-- no secrets logged
-- smoke tests pass with a dedicated test MR project
 
 ## 24. Important Linux verification items
 
 The following items must be verified on the actual Linux host and are deliberately not assumed by the repository itself:
 
-- systemd unit syntax and service boot behavior
-- real file ownership and permissions
-- firewall rules for port 8000
-- journald or logrotate behavior
-- backup retention/troubleshooting results
-- final GitLab webhook reachability
-- provider connectivity from the Linux server
-- actual service startup order and restart recovery
 
 This deployment work is complete only when those Linux-specific checks pass on the target environment.

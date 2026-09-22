@@ -10,7 +10,6 @@ def test_validate_required_runtime_requires_gitlab_and_provider_credentials(monk
     monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "")
     monkeypatch.setenv("OPENROUTER_API_KEY", "")
     monkeypatch.setenv("GROQ_API_KEY", "")
-    monkeypatch.setenv("WORKER_DATABASE_PATH", "/var/lib/git-ai-reviewer/jobs.sqlite3")
 
     settings = Settings()
 
@@ -25,7 +24,6 @@ def test_validate_required_runtime_accepts_one_ai_provider(monkeypatch):
     monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "")
     monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-key")
     monkeypatch.setenv("GROQ_API_KEY", "")
-    monkeypatch.setenv("WORKER_DATABASE_PATH", "/var/lib/git-ai-reviewer/jobs.sqlite3")
 
     settings = Settings()
     settings.validate_required_runtime()

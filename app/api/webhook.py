@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -10,8 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from app.config import get_settings
 from app.observability import log_event, record_metric
-from app.services.mr_processor import should_skip_duplicate
-from app.worker.store import JobStore
+from app.services import mr_processor
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -123,6 +123,16 @@ def _is_relevant_mr_event(event_data: Dict[str, Any], action: str) -> bool:
     )
 
 
+async def _run_in_process_mr_processing(event_data: Dict[str, Any]) -> None:
+    try:
+        await mr_processor.process_gitlab_event(event_data)
+    except Exception:
+        event_key = event_data.get("_dedupe_key") or event_data.get("webhook_id") or "background"
+        mr_processor.mark_event_failed(event_key)
+        log_event("PROCESSING_FAILED", level="ERROR", event_type="merge_request", result="failed", webhook_id=event_data.get("webhook_id"))
+        logger.exception("In-process MR processing failed safely")
+
+
 @router.post("/webhook/gitlab")
 async def gitlab_webhook(request: Request) -> Dict[str, Any]:
     settings = get_settings()
@@ -183,6 +193,7 @@ async def gitlab_webhook(request: Request) -> Dict[str, Any]:
             raise HTTPException(status_code=401, detail="Invalid GitLab webhook token")
 
     record_metric("webhook_received_total")
+    log_event("WEBHOOK_RECEIVED", level="INFO", event_type="merge_request", result="received", webhook_id=webhook_id)
     try:
         event_data = await request.json()
     except Exception as exc:
@@ -235,53 +246,33 @@ async def gitlab_webhook(request: Request) -> Dict[str, Any]:
         or f"{project_id}:{mr_iid}:{mr_event['action']}"
     )
 
-    if should_skip_duplicate(dedupe_key):
+    if mr_processor.should_skip_duplicate(dedupe_key):
         record_metric("webhook_duplicate_total")
         log_event("WEBHOOK_DUPLICATE", level="INFO", event_type="merge_request", result="duplicate", project_id=str(project_id), mr_iid=mr_iid, webhook_id=dedupe_key)
         logger.info("GitLab MR event is already queued or processing: %s", dedupe_key)
         return {"status": "duplicate", "event": event_name}
 
     event_data["webhook_id"] = dedupe_key
-    project_path = str((event_data.get("project") or {}).get("path_with_namespace") or "") or None
-    job_payload = {
-        "webhook_id": dedupe_key,
-        "object_kind": "merge_request",
-        "event_type": event_data.get("event_type"),
-        "project": {"id": project_id, "path_with_namespace": project_path},
-        "object_attributes": {
-            "iid": mr_iid,
-            "action": mr_event["action"],
-            "source_branch": (event_data.get("object_attributes") or {}).get("source_branch"),
-            "target_branch": (event_data.get("object_attributes") or {}).get("target_branch"),
-            "last_commit": (event_data.get("object_attributes") or {}).get("last_commit"),
-        },
-        "user": {"username": actor_username},
-    }
-    try:
-        job, created = JobStore(settings.worker_database_path).enqueue(
-            webhook_id=dedupe_key,
-            project_id=str(project_id),
-            project_path=project_path,
-            mr_iid=mr_iid,
-            action=str(mr_event["action"]),
-            event_type=event_name,
-            payload=job_payload,
-        )
-    except Exception as exc:
-        logger.exception("Durable webhook job persistence failed")
-        raise HTTPException(status_code=503, detail="Webhook job storage is unavailable") from exc
-    if not created:
-        logger.info("GitLab MR event is already persisted: job_id=%s webhook_id=%s", job.job_id, dedupe_key)
-        return {"status": "duplicate", "event": event_name, "job_id": job.job_id}
+    event_data["_dedupe_key"] = dedupe_key
+    mr_processor.mark_event_pending(dedupe_key)
+    asyncio.create_task(_run_in_process_mr_processing(event_data))
+    log_event("PROCESSING_SCHEDULED", level="INFO", event_type="merge_request", result="scheduled", project_id=str(project_id), mr_iid=mr_iid, webhook_id=dedupe_key)
     record_metric("webhook_accepted_total")
-    log_event("WEBHOOK_ACCEPTED", level="INFO", event_type="merge_request", result="accepted", project_id=str(project_id), mr_iid=mr_iid, job_id=job.job_id, webhook_id=dedupe_key, worker_id="receiver")
+    log_event(
+        "WEBHOOK_ACCEPTED",
+        level="INFO",
+        event_type="merge_request",
+        result="accepted",
+        project_id=str(project_id),
+        mr_iid=mr_iid,
+        webhook_id=dedupe_key,
+    )
     logger.info(
-        "GitLab MR webhook accepted and durably queued: event_id=%s job_id=%s project_id=%s mr_iid=%s action=%s actor_username=%s processing_decision=queued",
+        "GitLab MR webhook accepted for in-process handling: event_id=%s project_id=%s mr_iid=%s action=%s actor_username=%s processing_decision=background",
         dedupe_key,
-        job.job_id,
         project_id,
         mr_iid,
         mr_event["action"],
         actor_username,
     )
-    return {"status": "accepted", "event": event_name, "job_id": job.job_id}
+    return {"status": "accepted", "event": event_name, "processing": "in_process", "webhook_id": dedupe_key}

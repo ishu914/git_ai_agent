@@ -4,8 +4,7 @@ from starlette.requests import Request
 
 from app.api.webhook import router as webhook_router
 from app.config import get_settings
-from app.observability import metric_snapshot, set_gauge
-from app.worker.store import JobStore
+from app.observability import metric_snapshot
 
 
 def create_app() -> FastAPI:
@@ -38,27 +37,15 @@ def create_app() -> FastAPI:
 
     @app.get("/ready")
     async def readiness() -> dict:
-        try:
-            JobStore(settings.worker_database_path).initialize()
-            storage_status = "ready"
-        except Exception:
-            storage_status = "unavailable"
         return {
-            "status": "ready" if storage_status == "ready" else "not_ready",
-            "storage": storage_status,
-            "worker_enabled": settings.worker_enabled,
+            "status": "ready",
+            "storage": "not_applicable",
+            "processing_model": "single_process",
         }
 
     @app.get("/metrics")
     async def metrics() -> dict:
-        snapshot = metric_snapshot()
-        try:
-            counts = JobStore(settings.worker_database_path).status_counts()
-            for status_name, value in counts.items():
-                snapshot.setdefault("gauges", {})[f"{status_name.lower()}_jobs"] = value
-        except Exception:
-            pass
-        return snapshot
+        return metric_snapshot()
 
     return app
 

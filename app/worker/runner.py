@@ -6,6 +6,7 @@ import logging
 import signal
 import socket
 import time
+from types import SimpleNamespace
 from typing import Optional
 
 from app.config import get_settings
@@ -20,11 +21,24 @@ logger = logging.getLogger(__name__)
 class JobWorker:
     def __init__(self, store: Optional[JobStore] = None, worker_id: Optional[str] = None) -> None:
         settings = get_settings()
-        self.settings = settings
-        self.store = store or JobStore(settings.worker_database_path)
+        legacy_defaults = {
+            "worker_database_path": "data/jobs.sqlite3",
+            "worker_concurrency": 2,
+            "worker_lease_seconds": 900,
+            "worker_poll_interval_seconds": 2.0,
+            "worker_max_attempts": 3,
+            "worker_backoff_base_seconds": 5,
+            "worker_backoff_max_seconds": 300,
+            "worker_job_retention_days": 90,
+        }
+        settings_values = settings.model_dump()
+        for name, default in legacy_defaults.items():
+            settings_values.setdefault(name, default)
+        self.settings = SimpleNamespace(**settings_values)
+        self.store = store or JobStore(self.settings.worker_database_path)
         self.worker_id = worker_id or f"{socket.gethostname()}-{id(self)}"
         self._stop = False
-        self._semaphore = asyncio.Semaphore(min(settings.worker_concurrency, settings.ai_max_concurrent_reviews))
+        self._semaphore = asyncio.Semaphore(min(self.settings.worker_concurrency, self.settings.ai_max_concurrent_reviews))
         recovered = self.store.recover_expired()
         if recovered:
             record_metric("jobs_recovered_total")

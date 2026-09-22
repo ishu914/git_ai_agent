@@ -147,15 +147,36 @@ ai:
 
 ## 8. Backup & Database Retention
 
+All maintenance operations use `tools/manage_events.py` — a standalone CLI that
+operates directly against the `EventStore`. **No worker process, no systemd timer,
+no additional service is required.**
+
 ### Retention Policy
 - `EVENT_RETENTION_DAYS=90`: Purges `completed`, `failed`, and `obsolete` events older than 90 days.
 - Active (`pending`, `processing`, `retry`) events are **never** deleted.
-- Run retention cleanup CLI: `python -m app.worker.runner --cleanup-retention`
+
+Run manually from the application directory (cron or systemd oneshot if desired):
+```bash
+/opt/git-ai-reviewer/venv/bin/python -m tools.manage_events --cleanup-retention
+```
 
 ### SQLite Backup Procedure
 SQLite WAL mode allows live hot backups without locking reads or writes:
 ```bash
-python -m app.worker.runner --backup /var/backups/git-ai-agent/events-$(date +%F).sqlite3
+/opt/git-ai-reviewer/venv/bin/python -m tools.manage_events \
+  --backup /var/backups/git-ai-agent/events-$(date +%F).sqlite3
+```
+
+### Other Maintenance Commands
+```bash
+# Show event queue status counts
+/opt/git-ai-reviewer/venv/bin/python -m tools.manage_events --status
+
+# List dead-letter events
+/opt/git-ai-reviewer/venv/bin/python -m tools.manage_events --list-dead-letter
+
+# Manually requeue a dead-letter event by ID
+/opt/git-ai-reviewer/venv/bin/python -m tools.manage_events --retry-job <JOB_ID>
 ```
 
 ---

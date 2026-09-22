@@ -10,6 +10,9 @@ from app.ai.token_budget import deduplicate_findings
 logger = logging.getLogger(__name__)
 ALLOWED_STATUSES = {"reviewed", "unavailable", "pass", "warn", "fail"}
 ALLOWED_SEVERITIES = {"critical", "high", "medium", "low", "info", "warning"}
+ALLOWED_CHANGE_TYPES = {"feature", "bugfix", "refactor", "performance", "security", "documentation", "testing", "configuration", "dependency", "chore", "mixed", "unknown"}
+ALLOWED_RISKS = {"low", "medium", "high", "unknown"}
+ALLOWED_BREAKING = {"none identified", "potential", "confirmed", "unknown"}
 
 
 def _safe_finding(value: Any) -> Dict[str, Any] | None:
@@ -38,10 +41,12 @@ def _safe_finding(value: Any) -> Dict[str, Any] | None:
         line = None
     return {
         "severity": severity,
+        "category": str(value.get("category") or "info").lower().strip()[:40],
         "file": normalized_file[:300],
         "line": line,
         "issue": issue.strip()[:1000],
         "recommendation": str(value.get("recommendation") or "").strip()[:1000],
+        "confidence": str(value.get("confidence") or "").lower().strip()[:20],
     }
 
 
@@ -58,13 +63,20 @@ def normalize_review_result(result: Dict[str, Any]) -> Dict[str, Any]:
     status = str(result.get("status") or "reviewed").lower().strip()
     if status not in ALLOWED_STATUSES:
         status = "reviewed"
+    change_type = str(result.get("change_type") or "unknown").lower().strip()
+    risk = str(result.get("risk") or "unknown").lower().strip()
+    breaking_changes = str(result.get("breaking_changes") or "unknown").lower().strip()
     return {
         "status": status,
         "summary": str(result["summary"]).strip(),
         "findings": findings,
         "review_scope": result.get("review_scope", "full"),
         "excluded_files": result.get("excluded_files", []),
-        "breaking_changes": result.get("breaking_changes", []),
+        "breaking_changes": breaking_changes if breaking_changes in ALLOWED_BREAKING else "unknown",
+        "reviewer_attention": result.get("reviewer_attention", []),
+        "testing": result.get("testing", ""),
+        "risk": risk if risk in ALLOWED_RISKS else "unknown",
+        "change_type": change_type if change_type in ALLOWED_CHANGE_TYPES else "unknown",
     }
 
 

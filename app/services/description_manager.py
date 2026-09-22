@@ -29,6 +29,21 @@ def build_ai_section(data: Dict[str, Any]) -> str:
     files_summary = "\n".join(f"- {item}" for item in _as_text_list(data.get("files_summary")))
     review_scope = _as_text(data.get("review_scope"), "full")
     excluded_files = ", ".join(_as_text_list(data.get("excluded_files")))
+    breaking_changes = _as_text(data.get("breaking_changes"), "none identified")
+    reviewer_attention = _as_text_list(data.get("reviewer_attention"))
+    findings = data.get("findings") or []
+    finding_lines = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        severity = _as_text(finding.get("severity"), "info")
+        category = _as_text(finding.get("category"), "info")
+        file_name = _as_text(finding.get("file"), "unknown")
+        line = finding.get("line")
+        location = f"{file_name}:{line}" if isinstance(line, int) and line > 0 else file_name
+        issue = _as_text(finding.get("issue"), "")
+        recommendation = _as_text(finding.get("recommendation"), "")
+        finding_lines.append(f"- **{severity} / {category}** `{location}` {issue}" + (f" **Recommendation:** {recommendation}" if recommendation else ""))
 
     return (
         f"{AI_SECTION_START}\n"
@@ -38,6 +53,11 @@ def build_ai_section(data: Dict[str, Any]) -> str:
         f"### Files Changed\n{files_summary or 'No file summary available.'}\n\n"
         f"### Testing\n{testing or 'Testing not specified.'}\n\n"
         f"### Risk\n{risk or 'low'}\n"
+        f"### Breaking Changes\n{breaking_changes}\n"
+        "### Reviewer Attention\n"
+        f"{chr(10).join(f'- {item}' for item in reviewer_attention) if reviewer_attention else 'No additional reviewer attention identified.'}\n"
+        "### Findings\n"
+        f"{chr(10).join(finding_lines) if finding_lines else 'No actionable findings identified.'}\n"
         f"### Review Scope\n{review_scope}\n"
         f"{f'Excluded: {excluded_files}\n' if excluded_files else ''}"
         f"{AI_SECTION_END}"

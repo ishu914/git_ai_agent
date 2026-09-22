@@ -12,3 +12,11 @@ blocked_files:
   - .env.*
   - "*.pem"
   - "*.key"
+commit_message:
+  enabled: false
+  generate_when_default: false
+  preserve_user_message: true
+  placeholders:
+    - "Update"
+    - "Changes"
+    - "WIP"

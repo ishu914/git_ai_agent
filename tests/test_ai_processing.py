@@ -3,7 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.ai.mr_summary import generate_mr_summary
+from app.ai.code_reviewer import normalize_review_result
+from app.ai.mr_summary import generate_mr_summary, render_mr_summary
 from app.ai.types import AIUnavailableError
 from app.services import mr_processor
 from app.services.description_manager import build_ai_section
@@ -61,6 +62,46 @@ def test_missing_summary_returns_unavailable_empty_result():
     result = generate_mr_summary(FakeAIClient({"change_type": "feature"}), _context())
 
     assert result == ""
+
+
+def test_review_normalization_keeps_actionable_fields_and_drops_invalid_findings():
+    result = normalize_review_result({
+        "summary": "Authentication behavior changed.",
+        "change_type": "security",
+        "risk": "medium",
+        "breaking_changes": "potential",
+        "findings": [
+            {"severity": "high", "category": "security", "file": "app/auth.py", "line": 12, "issue": "Token is logged.", "recommendation": "Remove the log."},
+            {"severity": "info", "file": "../../secret.txt", "issue": "unsafe path"},
+        ],
+    })
+
+    assert result["findings"] == [{
+        "severity": "high",
+        "category": "security",
+        "file": "app/auth.py",
+        "line": 12,
+        "issue": "Token is logged.",
+        "recommendation": "Remove the log.",
+        "confidence": "",
+    }]
+    rendered = render_mr_summary({**result, "deterministic_files": ["app/auth.py (+2 / -1)"]})
+    assert "app/auth.py (+2 / -1)" in rendered
+    assert "Breaking Changes" in rendered
+    assert "No actionable findings identified." not in rendered
+    assert "{'severity'" not in rendered
+
+
+def test_render_summary_has_no_artificial_finding_for_trivial_change():
+    rendered = render_mr_summary({
+        "summary": "Adds a health import.",
+        "change_type": "unknown",
+        "risk": "low",
+        "findings": [],
+        "deterministic_files": ["app/main.py (+1 / -0)"],
+    })
+
+    assert "No actionable findings identified." in rendered
 
 
 def test_description_section_preserves_developer_content():

@@ -112,5 +112,5 @@ def test_orchestrator_reuses_cached_analysis(monkeypatch, tmp_path):
 def test_review_fingerprint_includes_policy_version():
     fingerprint = review_fingerprint("1", 2, {"changes": []})
 
-    assert REVIEW_POLICY_VERSION == "phase4-quality-v1"
+    assert REVIEW_POLICY_VERSION == "phase8-quality-v1"
     assert len(fingerprint) == 64

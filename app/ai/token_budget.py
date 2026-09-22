@@ -9,7 +9,7 @@ LOW_VALUE_PARTS = (".git", "node_modules", "vendor", "dist", "build", "coverage"
 LOW_VALUE_NAMES = ("lock", ".min.", ".map", ".bundle")
 SOURCE_EXTENSIONS = {".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rb", ".php", ".sql", ".yaml", ".yml", ".json", ".toml", ".sh"}
 SECURITY_HINTS = ("auth", "login", "permission", "secret", "token", "password", "crypto", "security", "api", "sql", "docker", ".env")
-REVIEW_POLICY_VERSION = "phase4-quality-v1"
+REVIEW_POLICY_VERSION = "phase8-quality-v1"
 SECRET_PATTERNS = (
     re.compile(r"(?i)((?:authorization|auth|password|passwd|token|api[_-]?key|secret|access[_-]?key|private[_-]?key|aws_secret_access_key))\s*[:=]\s*(?:bearer\s+)?([^\s,;\]\)\}\"']+)"),
     re.compile(r"(?i)\b(?:bearer)\s+([A-Za-z0-9_\-\.]{6,})\b"),
@@ -89,11 +89,36 @@ def build_compact_review_payload(
         if len(clipped) < len(diff):
             excluded.append(f"{path} (truncated)")
 
+    file_facts = []
+    for entry in changes:
+        old_path = str(entry.get("old_path") or "")
+        new_path = str(entry.get("new_path") or "")
+        file_facts.append({
+            "path": new_path or old_path or "unknown",
+            "old_path": old_path or None,
+            "status": "renamed" if old_path and new_path and old_path != new_path else "added" if entry.get("new_file") else "deleted" if entry.get("deleted_file") else "modified",
+            "additions": int(entry.get("additions") or 0),
+            "deletions": int(entry.get("deletions") or 0),
+            "binary": bool(entry.get("binary") or entry.get("is_binary")),
+            "test_file": _is_test_path(new_path or old_path),
+        })
+
+    commits = []
+    for commit in mr_context.get("commits") or []:
+        if isinstance(commit, dict):
+            message = redact_sensitive_text(str(commit.get("title") or commit.get("message") or "")).strip()
+            if message:
+                commits.append(message[:500])
+        elif str(commit).strip():
+            commits.append(redact_sensitive_text(str(commit).strip())[:500])
+
     payload = {
         "title": redact_sensitive_text(str(mr.get("title") or ""))[:500],
         "description": redact_sensitive_text(str(mr.get("description") or ""))[:1000],
         "source_branch": str(mr.get("source_branch") or ""),
         "target_branch": str(mr.get("target_branch") or ""),
+        "commits": commits[:20],
+        "file_facts": file_facts,
         "validation": {
             "status": validation.get("status"),
             "files": len(mr_context.get("changed_files") or []),
@@ -103,9 +128,15 @@ def build_compact_review_payload(
             "checks": [{"name": check.get("name"), "status": check.get("status")} for check in validation.get("checks", [])],
         },
         "changes": compact_changes,
-        "instruction": "Return compact JSON only: summary, change_type, risk, findings, testing, breaking_changes. Report all material security/correctness findings, deduplicate root causes, omit style-only comments. Include review_scope=partial when files are excluded.",
+        "instruction": "Return compact JSON only with summary, change_type, risk, findings, testing, breaking_changes, and reviewer_attention. Use only evidence in this payload. Do not invent intent; say intent is not explicitly stated when needed. Findings must be actionable, not style-only or line-change commentary. Return an empty findings list when no actionable issue exists. Include review_scope=partial when files are excluded.",
     }
     return payload, bool(excluded), excluded
+
+
+def _is_test_path(path: str) -> bool:
+    normalized = path.replace("\\", "/").lower()
+    name = normalized.rsplit("/", 1)[-1]
+    return "/test" in normalized or name.startswith("test_") or name.endswith("_test.py")
 
 
 def review_fingerprint(project_id: Any, mr_iid: Any, payload: Dict[str, Any]) -> str:

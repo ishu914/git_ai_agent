@@ -78,8 +78,13 @@ def _format_ai_review_note(review: Dict[str, Any]) -> str:
             if isinstance(finding, dict):
                 severity = str(finding.get("severity") or "unspecified").strip()
                 file_name = str(finding.get("file") or finding.get("path") or "unknown").strip()
-                detail = str(finding.get("message") or finding.get("description") or finding).strip()
-                lines.append(f"- **{severity}** `{file_name}`: {detail}")
+                category = str(finding.get("category") or "info").strip()
+                line = finding.get("line")
+                location = f"{file_name}:{line}" if isinstance(line, int) and line > 0 else file_name
+                detail = str(finding.get("issue") or finding.get("message") or finding.get("description") or "").strip()
+                recommendation = str(finding.get("recommendation") or "").strip()
+                suffix = f" Recommendation: {recommendation}" if recommendation else ""
+                lines.append(f"- **{severity} / {category}** `{location}`: {detail}{suffix}")
             else:
                 lines.append(f"- {str(finding).strip()}")
     lines.append("")
@@ -146,6 +151,11 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
     try:
         log_event("AI_REVIEW_STARTED", level="INFO", event_type="merge_request", result="started", project_id=project_id, mr_iid=mr_iid, webhook_id=event_id)
         analysis = ai_orchestrator.analyze_mr(project_id, mr_iid, context, validation)
+        analysis = dict(analysis)
+        analysis["deterministic_files"] = [
+            f"{item['path']} (+{item['additions']} / -{item['deletions']})"
+            for item in context["changed_files"]
+        ]
         log_event("AI_REVIEW_COMPLETED", level="INFO", event_type="merge_request", result="completed", project_id=project_id, mr_iid=mr_iid, webhook_id=event_id, provider=analysis.get("provider"), model=analysis.get("model"))
         ai_summary = render_mr_summary(analysis)
         ai_review = normalize_review_result(analysis)

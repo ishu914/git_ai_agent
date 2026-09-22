@@ -91,6 +91,14 @@ The processing pipeline:
 
 The orchestrator still handles model discovery, provider fallback, cooldown, quota circuit breaking, token budgets, and secret masking. The worker does not own any of that logic.
 
+### Review quality and commit messages
+
+Review payloads include MR metadata, commit messages, deterministic file facts, diff statistics, and validation results without sending the repository wholesale. Python supplies file paths, additions, deletions, rename/binary/test classification, and diff size; AI explains engineering impact and reports only actionable findings.
+
+Summaries distinguish evidence from unknown intent. Risk, change type, breaking-change status, testing assessment, reviewer attention, and review scope are normalized before the controlled AI section is rendered. Developer-written description text remains outside the `AI_REVIEW_START` and `AI_REVIEW_END` markers.
+
+Commit-message generation is opt-in through `config/projects/default.yaml`. Meaningful user messages are preserved. AI may generate only for explicitly configured placeholder messages, and generated candidates are rejected if they contain secrets or fabricated issue identifiers. This feature selects a message; it never rewrites a GitLab commit.
+
 ## Security model
 
 The service treats repository content as untrusted input and keeps the AI behind fixed, controlled GitLab client operations. It never automates approval, merge, push, branch writes, or permission changes.

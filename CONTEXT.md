@@ -92,6 +92,9 @@ This project is currently in a production-hardening, evaluation, and observabili
 - Review fingerprints prevent redundant AI calls for unchanged content.
 - Partial reviews are possible when the configured budget excludes some files or content.
 - The system records conservative provider metadata without storing raw secret-bearing responses.
+- Review payloads include authoritative MR commit messages and deterministic file facts without sending the whole repository.
+- Review output normalizes risk, change type, breaking-change status, testing, reviewer attention, and actionable findings before rendering.
+- Commit-message generation is opt-in and preserves meaningful user messages; it does not mutate GitLab commits.
 
 ## 6. Runtime configuration
 

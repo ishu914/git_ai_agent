@@ -16,7 +16,10 @@ def render_mr_summary(result: Dict[str, Any]) -> str:
         "change_type": result.get("change_type"),
         "testing": result.get("testing"),
         "risk": result.get("risk"),
-        "files_summary": result.get("files_summary"),
+        "files_summary": result.get("files_summary") or result.get("deterministic_files"),
+        "breaking_changes": result.get("breaking_changes"),
+        "reviewer_attention": result.get("reviewer_attention"),
+        "findings": result.get("findings"),
         "review_scope": result.get("review_scope", "full"),
         "excluded_files": result.get("excluded_files", []),
     })
@@ -33,7 +36,7 @@ def generate_mr_summary(ai_client: OpenRouterClient, mr_context: Dict[str, Any])
         "source_branch": mr.get("source_branch", ""),
         "target_branch": mr.get("target_branch", ""),
         "files": file_names[:20],
-        "instruction": "Return JSON with summary, change_type, files_summary, testing, risk. Keep every value concise.",
+        "instruction": "Return JSON with summary, change_type, testing, risk, breaking_changes, and reviewer_attention. Use only supplied evidence; do not invent intent.",
     }
 
     messages = build_messages_for_review("mr-summary", str(prompt))

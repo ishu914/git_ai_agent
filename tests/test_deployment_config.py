@@ -35,7 +35,7 @@ def test_active_systemd_deployment_is_single_process():
     service = (root / "deploy" / "systemd" / "git-ai-agent.service").read_text(encoding="utf-8")
     deployment = (root / "docs" / "DEPLOYMENT.md").read_text(encoding="utf-8")
 
-    assert "ExecStart=/opt/git-ai-reviewer/venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000" in service
+    assert "ExecStart=/opt/git-ai-reviewer/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000" in service
     assert "Restart=on-failure" in service
     assert "User=git-ai-reviewer" in service
     assert "ProtectSystem=strict" in service

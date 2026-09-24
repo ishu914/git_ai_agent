@@ -33,6 +33,21 @@ class Settings(BaseSettings):
     groq_model_discovery_cache_ttl_seconds: int = Field(default=3600, alias="GROQ_MODEL_DISCOVERY_CACHE_TTL_SECONDS")
     groq_base_url: str = Field(default="https://api.groq.com/openai/v1", alias="GROQ_BASE_URL")
 
+    anthropic_api_key: Optional[str] = Field(default=None, alias="ANTHROPIC_API_KEY")
+    anthropic_model: Optional[str] = Field(default=None, alias="ANTHROPIC_MODEL")
+    anthropic_base_url: str = Field(default="https://api.anthropic.com", alias="ANTHROPIC_BASE_URL")
+    anthropic_enabled: bool = Field(default=True, alias="ANTHROPIC_ENABLED")
+
+    openai_api_key: Optional[str] = Field(default=None, alias="OPENAI_API_KEY")
+    openai_model: Optional[str] = Field(default=None, alias="OPENAI_MODEL")
+    openai_base_url: str = Field(default="https://api.openai.com/v1", alias="OPENAI_BASE_URL")
+    openai_enabled: bool = Field(default=True, alias="OPENAI_ENABLED")
+
+    ollama_base_url: str = Field(default="http://localhost:11434", alias="OLLAMA_BASE_URL")
+    ollama_model: Optional[str] = Field(default=None, alias="OLLAMA_MODEL")
+    ollama_enabled: bool = Field(default=False, alias="OLLAMA_ENABLED")
+    ai_provider_priority: str = Field(default="anthropic,openai,ollama,openrouter,groq", alias="AI_PROVIDER_PRIORITY")
+
     ai_total_max_attempts: int = Field(default=8, alias="AI_TOTAL_MAX_ATTEMPTS")
     ai_model_cooldown_seconds: int = Field(default=300, alias="AI_MODEL_COOLDOWN_SECONDS")
     ai_max_input_tokens_per_request: int = Field(default=12000, alias="AI_MAX_INPUT_TOKENS_PER_REQUEST")
@@ -74,8 +89,15 @@ class Settings(BaseSettings):
             raise ValueError("GITLAB_TOKEN is missing")
         if not self.gitlab_webhook_signing_token and not self.gitlab_webhook_secret:
             raise ValueError("GITLAB_WEBHOOK_SIGNING_TOKEN is missing")
-        if not self.openrouter_api_key and not self.groq_api_key:
-            raise ValueError("OPENROUTER_API_KEY is missing and GROQ_API_KEY is missing")
+        configured = (
+            (self.openrouter_enabled and self.openrouter_api_key)
+            or (self.groq_enabled and self.groq_api_key)
+            or (self.anthropic_enabled and self.anthropic_api_key and self.anthropic_model)
+            or (self.openai_enabled and self.openai_api_key and self.openai_model)
+            or (self.ollama_enabled and self.ollama_model)
+        )
+        if not configured:
+            raise ValueError("No enabled AI provider is configured")
 
     @classmethod
     def settings_customise_sources(

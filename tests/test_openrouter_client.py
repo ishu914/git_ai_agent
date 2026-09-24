@@ -4,10 +4,21 @@ from typing import Any
 import pytest
 
 from app.ai.client import OpenRouterClient
+from app.ai.anthropic_client import AnthropicClient
+from app.ai.ollama_client import OllamaClient
+from app.ai.openai_client import OpenAIClient
 from app.ai.code_reviewer import review_merge_request
 from app.ai.model_discovery import ModelDiscoveryCache, candidates_from_catalog
 from app.ai.orchestrator import AIOrchestrator
 from app.ai.types import AIModelCandidate, AIUnavailableError
+from app.ai.failure_status import (
+    NO_PROVIDER,
+    RATE_LIMITED,
+    TIMEOUT,
+    UNREACHABLE,
+    UNUSABLE,
+    classify_ai_failures,
+)
 
 
 class FakeResponse:
@@ -302,3 +313,73 @@ def test_orchestrator_enforces_global_attempt_limit(monkeypatch, tmp_path):
     with pytest.raises(AIUnavailableError):
         orchestrator.chat_completion([])
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("errors", "expected"),
+    [
+        ([RuntimeError("provider=openrouter model=space-bunny status=429 quota")], RATE_LIMITED),
+        ([RuntimeError("provider=anthropic model=claude auth failed 401")], UNREACHABLE),
+        ([RuntimeError("provider=groq model=qwen incomplete finish_reason=length")], UNUSABLE),
+        ([TimeoutError("provider=openai model=gpt timed out")], TIMEOUT),
+        ([], NO_PROVIDER),
+    ],
+)
+def test_failure_classifier_returns_safe_fixed_status(errors, expected):
+    status = classify_ai_failures(errors, no_provider=not errors)
+    assert status == expected
+    for raw in ("openrouter", "anthropic", "groq", "openai", "space-bunny", "claude", "qwen", "gpt", "429", "401", "length"):
+        assert raw not in status.lower()
+
+
+def test_all_provider_failures_publish_one_aggregate_safe_status(monkeypatch, tmp_path):
+    empty_env = tmp_path / "empty.env"
+    empty_env.write_text("", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV_FILE", str(empty_env))
+    orchestrator = AIOrchestrator()
+    candidates = [AIModelCandidate("anthropic", "secret-model"), AIModelCandidate("openai", "other-model")]
+
+    class FailingClient:
+        def chat_completion(self, *args, **kwargs):
+            raise RuntimeError("provider=internal model=secret-model status=429 quota")
+
+    monkeypatch.setattr(orchestrator, "_configured_candidates", lambda: candidates)
+    monkeypatch.setattr(orchestrator, "candidates", lambda: candidates)
+    monkeypatch.setattr(orchestrator, "_client_for", lambda candidate: FailingClient())
+    with pytest.raises(AIUnavailableError) as exc_info:
+        orchestrator.chat_completion([])
+    assert str(exc_info.value) == RATE_LIMITED
+    assert str(exc_info.value).count("AI review unavailable") == 1
+    assert "secret-model" not in str(exc_info.value)
+
+
+def test_priority_skips_unconfigured_providers_and_orders_configured_ones(monkeypatch, tmp_path):
+    empty_env = tmp_path / "empty.env"
+    empty_env.write_text("", encoding="utf-8")
+    monkeypatch.setenv("APP_ENV_FILE", str(empty_env))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-test-key")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "gateway-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
+    monkeypatch.setenv("OPENAI_MODEL", "openai-model")
+    monkeypatch.setenv("AI_PROVIDER_PRIORITY", "openai,anthropic,ollama,openrouter,groq")
+    orchestrator = AIOrchestrator()
+    assert [candidate.provider for candidate in orchestrator.candidates()] == ["openai", "anthropic"]
+
+
+def test_anthropic_compatible_client_uses_configured_gateway_and_parses_json(monkeypatch):
+    client = AnthropicClient("anthropic-key", "AECO_AI", "https://ai-gateway.example/", max_retries=0)
+    monkeypatch.setattr(client, "_request", lambda *args: FakeResponse(200, {"content": [{"text": '{"summary":"ok"}'}]}))
+    assert client.base_url == "https://ai-gateway.example/"
+    assert client.chat_completion([{"role": "user", "content": "review"}]) == {"summary": "ok"}
+
+
+def test_ollama_client_parses_native_chat_response(monkeypatch):
+    client = OllamaClient("llama3", "http://localhost:11434", max_retries=0)
+    monkeypatch.setattr(client, "_request", lambda *args: FakeResponse(200, {"message": {"content": '{"summary":"local"}'}}))
+    assert client.chat_completion([{"role": "user", "content": "review"}]) == {"summary": "local"}
+
+
+def test_openai_compatible_client_uses_bearer_headers():
+    client = OpenAIClient("openai-key", "gateway-model", "https://gateway.example/v1", max_retries=0)
+    assert client.base_url == "https://gateway.example/v1"
+    assert client._headers()["Authorization"] == "Bearer openai-key"

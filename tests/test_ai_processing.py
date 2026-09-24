@@ -259,3 +259,6 @@ def test_processor_updates_unavailable_status_after_all_ai_failures(monkeypatch)
     assert result["summary_status"] == "unavailable"
     assert "AI Status\nUnavailable" in updates[0]
     assert "Developer content" in updates[0]
+    assert updates[0].count("AI review unavailable:") == 1
+    assert "OpenRouter" not in updates[0]
+    assert "quota exhausted" not in updates[0]

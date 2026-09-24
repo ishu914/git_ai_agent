@@ -38,6 +38,8 @@ def test_log_event_redacts_credential_values_in_fields_and_error_text(caplog):
         "gitlab_token": "glpat-synthetic-token-value",
         "webhook_secret": "synthetic-webhook-secret",
         "openrouter_api_key": "sk-synthetic-provider-key",
+        "anthropic_api_key": "sk-ant-synthetic-provider-key",
+        "openai_api_key": "sk-openai-synthetic-provider-key",
     }
     with caplog.at_level("INFO"):
         log_event("SYNTHETIC_FAILURE", **secrets, error="Authorization: Bearer synthetic-authorisation-value")

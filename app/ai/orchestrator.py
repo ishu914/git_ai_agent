@@ -10,6 +10,10 @@ from app.ai.client import (
     OpenRouterResponseError,
 )
 from app.ai.groq_client import GroqClient
+from app.ai.anthropic_client import AnthropicClient
+from app.ai.openai_client import OpenAIClient
+from app.ai.ollama_client import OllamaClient
+from app.ai.failure_status import classify_ai_failures, NO_PROVIDER
 from app.ai.types import AIModelCandidate, AIUnavailableError
 from app.ai.token_budget import build_compact_review_payload, estimate_tokens, review_fingerprint
 from app.ai.commit_message import select_commit_message, should_generate_commit_message
@@ -35,7 +39,7 @@ class AIOrchestrator:
         self.last_client_usage: Dict[str, int] = {}
         self.last_provider = ""
         self.last_model = ""
-        self.last_failure_reason = "AI providers unavailable."
+        self.last_failure_reason = NO_PROVIDER
 
     def _available(self, candidate: AIModelCandidate) -> bool:
         return MODEL_COOLDOWNS.get(f"{candidate.provider}:{candidate.model_id}", 0) <= time.monotonic()
@@ -67,21 +71,57 @@ class AIOrchestrator:
         candidates = client.discover_models(self.settings.groq_model_discovery_cache_ttl_seconds)
         return candidates[: self.settings.groq_model_max_attempts]
 
+    def _anthropic_candidates(self) -> List[AIModelCandidate]:
+        if not (self.settings.anthropic_enabled and self.settings.anthropic_api_key and self.settings.anthropic_model):
+            return []
+        return [AIModelCandidate("anthropic", self.settings.anthropic_model, supports_json=True)]
+
+    def _openai_candidates(self) -> List[AIModelCandidate]:
+        if not (self.settings.openai_enabled and self.settings.openai_api_key and self.settings.openai_model):
+            return []
+        return [AIModelCandidate("openai", self.settings.openai_model, supports_json=True)]
+
+    def _ollama_candidates(self) -> List[AIModelCandidate]:
+        if not (self.settings.ollama_enabled and self.settings.ollama_model):
+            return []
+        return [AIModelCandidate("ollama", self.settings.ollama_model, supports_json=True)]
+
+    def _configured_candidates(self) -> List[AIModelCandidate]:
+        providers = {
+            "anthropic": self._anthropic_candidates,
+            "openai": self._openai_candidates,
+            "ollama": self._ollama_candidates,
+            "openrouter": self._openrouter_candidates,
+            "groq": self._groq_candidates,
+        }
+        priority = [item.strip().lower() for item in self.settings.ai_provider_priority.split(",") if item.strip()]
+        ordered = priority + [name for name in providers if name not in priority]
+        candidates: List[AIModelCandidate] = []
+        for provider in ordered:
+            factory = providers.get(provider)
+            if factory:
+                candidates.extend(factory())
+        return candidates
+
     def candidates(self, external_allowed: Optional[bool] = None) -> List[AIModelCandidate]:
         if external_allowed is None:
             external_allowed = getattr(self.settings, "ai_external_providers_allowed", True)
         if not external_allowed:
             return []
-        return [
-            candidate
-            for candidate in self._openrouter_candidates() + self._groq_candidates()
-            if self._provider_available(candidate.provider)
-        ]
+        return [candidate for candidate in self._configured_candidates() if self._provider_available(candidate.provider)]
 
     def _client_for(self, candidate: AIModelCandidate):
         if candidate.provider == "openrouter":
             return OpenRouterClient(api_key=self.settings.openrouter_api_key, model=candidate.model_id, max_retries=0)
-        return GroqClient(api_key=self.settings.groq_api_key, model=candidate.model_id, max_retries=0)
+        if candidate.provider == "groq":
+            return GroqClient(api_key=self.settings.groq_api_key, model=candidate.model_id, max_retries=0)
+        if candidate.provider == "anthropic":
+            return AnthropicClient(self.settings.anthropic_api_key, candidate.model_id, self.settings.anthropic_base_url, max_retries=0)
+        if candidate.provider == "openai":
+            return OpenAIClient(self.settings.openai_api_key, candidate.model_id, self.settings.openai_base_url, max_retries=0)
+        if candidate.provider == "ollama":
+            return OllamaClient(candidate.model_id, self.settings.ollama_base_url, max_retries=0)
+        raise ValueError(f"Unknown AI provider: {candidate.provider}")
 
     @staticmethod
     def _failure_reason(error: Exception) -> str:
@@ -121,11 +161,13 @@ class AIOrchestrator:
         )
 
     def chat_completion(self, messages: List[Dict[str, Any]], temperature: float = 0.2, max_tokens: Optional[int] = None) -> Dict[str, Any]:
+        configured = self._configured_candidates()
         candidates = [candidate for candidate in self.candidates() if candidate.enabled and self._available(candidate)]
         if not candidates:
-            self.last_failure_reason = "All configured AI providers/models are unavailable."
+            self.last_failure_reason = classify_ai_failures([], no_provider=not configured)
             raise AIUnavailableError(self.last_failure_reason)
 
+        failures: List[Exception] = []
         for candidate in candidates:
             if not self._provider_available(candidate.provider):
                 continue
@@ -142,6 +184,7 @@ class AIOrchestrator:
                 logger.info("AI success: provider=%s model=%s", candidate.provider, candidate.model_id)
                 return result
             except Exception as exc:
+                failures.append(exc)
                 self._cooldown(candidate)
                 self.last_failure_reason = self._failure_reason(exc)
                 if candidate.provider == "openrouter" and self._is_account_quota_failure(exc):
@@ -162,7 +205,8 @@ class AIOrchestrator:
                     self.last_failure_reason,
                 )
 
-        raise AIUnavailableError(f"All configured AI providers/models failed: {self.last_failure_reason}")
+        self.last_failure_reason = classify_ai_failures(failures)
+        raise AIUnavailableError(self.last_failure_reason)
 
     def inventory(self) -> Dict[str, Any]:
         openrouter = self._openrouter_candidates()
@@ -172,6 +216,9 @@ class AIOrchestrator:
             "openrouter": [candidate.__dict__ for candidate in openrouter],
             "groq_configured": bool(self.settings.groq_api_key),
             "groq": [candidate.__dict__ for candidate in groq],
+            "anthropic_configured": bool(self.settings.anthropic_api_key and self.settings.anthropic_model),
+            "openai_configured": bool(self.settings.openai_api_key and self.settings.openai_model),
+            "ollama_configured": bool(self.settings.ollama_model),
         }
 
     def generate_commit_message(self, commits: List[Dict[str, Any]], context: Dict[str, Any], policy: Dict[str, Any]) -> Optional[str]:

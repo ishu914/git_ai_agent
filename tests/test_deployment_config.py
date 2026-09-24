@@ -14,7 +14,7 @@ def test_validate_required_runtime_requires_gitlab_and_provider_credentials(monk
 
     settings = Settings()
 
-    with pytest.raises(ValueError, match="GITLAB_TOKEN is missing|OPENROUTER_API_KEY is missing|GROQ_API_KEY is missing"):
+    with pytest.raises(ValueError, match="GITLAB_TOKEN is missing|No enabled AI provider is configured"):
         settings.validate_required_runtime()
 
 

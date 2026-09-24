@@ -1,6 +1,8 @@
 import re
 from typing import Any, Dict
 
+from app.ai.failure_status import public_ai_failure_status
+
 
 AI_SECTION_START = "<!-- AI_REVIEW_START -->"
 AI_SECTION_END = "<!-- AI_REVIEW_END -->"
@@ -82,11 +84,12 @@ def build_ai_section(data: Dict[str, Any]) -> str:
 
 def build_ai_unavailable_section(reason: str, validation: Dict[str, Any]) -> str:
     validation_status = str(validation.get("status", "unknown")).strip()
+    safe_reason = public_ai_failure_status(reason)
     return (
         f"{AI_SECTION_START}\n"
         "## AI Review\n\n"
         "### AI Status\nUnavailable\n\n"
-        f"### Reason\n{_as_text(reason, 'All configured AI providers/models failed to return a usable response.')}\n\n"
+        f"### Reason\n{safe_reason}\n\n"
         f"### Deterministic Validation\n{validation_status}\n\n"
         "AI analysis was unavailable. Human review is still required.\n"
         f"{AI_SECTION_END}"

@@ -52,11 +52,27 @@ OPENROUTER_ENABLED=true
 GROQ_API_KEY=...
 GROQ_ENABLED=true
 
+ANTHROPIC_API_KEY=...
+ANTHROPIC_MODEL=claude-...
+ANTHROPIC_BASE_URL=https://api.anthropic.com
+ANTHROPIC_ENABLED=false
+
+OPENAI_API_KEY=...
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_ENABLED=false
+
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=...
+OLLAMA_ENABLED=false
+
+AI_PROVIDER_PRIORITY=anthropic,openai,ollama,openrouter,groq
+
 AI_AGENT_HOST=0.0.0.0
 AI_AGENT_PORT=8000
 ```
 
-The application validates the runtime configuration on startup and requires either OpenRouter or Groq credentials to reach the AI gate. If no live provider is configured, the system still exposes health/readiness and fails closed at the AI step without fabricating provider output.
+The default provider order is Anthropic, OpenAI, Ollama, OpenRouter, then Groq. Disabled or incompletely configured providers are skipped without an attempted request. Anthropic and OpenAI base URLs support compatible internal gateways; Ollama needs a model and normally no key. The application requires at least one enabled, fully configured provider at startup and fails closed at the AI step without fabricating provider output.
 
 ## Run locally
 

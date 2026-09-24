@@ -8,12 +8,13 @@ The active model is intentionally simple and single-service:
 
 GitLab System Hook
 	-> FastAPI webhook endpoint
-	-> in-process async task
+	-> durable SQLite event store
+	-> in-process event dispatcher
 	-> authoritative MR fetch and validation
 	-> AI orchestration / fallback
 	-> AI-managed MR description update and review note
 
-There is no separate worker process and no durable SQLite queue in the active runtime model.
+The service runs as one FastAPI process. Accepted events are persisted to SQLite before acknowledgement; the in-process dispatcher is the only path that invokes MR processing. There is no separate worker process.
 
 ## Requirements
 
@@ -73,9 +74,9 @@ python -m app.main
 
 ## Webhook flow
 
-The webhook endpoint validates the GitLab signature and timestamp, rejects irrelevant or duplicate events, and schedules processing through an in-process async task. This keeps the service single-process and avoids a second management daemon.
+The webhook endpoint validates the GitLab signature and timestamp, rejects irrelevant or duplicate events, persists accepted events, and wakes the in-process dispatcher. The dispatcher atomically claims durable events and runs processing within the configured concurrency limit. This keeps the service single-process and avoids a second management daemon.
 
-No queue database, worker lease, retry loop, or backup process is required in the current runtime contract.
+The SQLite event store uses WAL mode and a busy timeout. It records claim leases, retry scheduling, dead-letter state, retention cleanup, and online backups. `EVENT_MAX_QUEUE_DEPTH` bounds pending and retrying events; new unique deliveries receive HTTP 429 when the queue is full.
 
 ## AI review behavior
 
@@ -89,7 +90,7 @@ The processing pipeline:
 - updates only the AI-managed MR description section
 - creates or updates the AI review note
 
-The orchestrator still handles model discovery, provider fallback, cooldown, quota circuit breaking, token budgets, and secret masking. The worker does not own any of that logic.
+The orchestrator handles model discovery, provider fallback, cooldown, quota circuit breaking, token budgets, and secret masking.
 
 ### Review quality and commit messages
 
@@ -113,7 +114,7 @@ The FastAPI app exposes:
 - `/ready`
 - `/metrics`
 
-These report the live single-process runtime state and do not pretend a queue or worker exists.
+These report the live single-process runtime state. `/health` is independent of queued processing, while `/ready` verifies durable-store availability.
 
 ## Production deployment
 
@@ -164,8 +165,8 @@ Run the repository test suite with the project virtual environment:
 python -m pytest -q
 ```
 
-The current suite includes deterministic webhook, security, AI fallback, observability, and end-to-end validation for the single-process model.
+The current suite includes deterministic webhook, durable-event-store, security, AI fallback, observability, and end-to-end validation for the single-process model.
 
 ## Known limitation
 
-The current single-process design intentionally does not include a durable queue or crash recovery mechanism. If the FastAPI process exits, in-flight work is lost; the design assumes a single-service deployment with normal process supervision and restart.
+The dispatcher remains in-process, so an operation interrupted during process shutdown can be retried after restart. Events left in processing state recover through their expired leases; completed and dead-letter events remain durable for retention and operational inspection.

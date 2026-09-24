@@ -19,12 +19,9 @@ def isolate_webhook_environment(monkeypatch, tmp_path):
     empty_env_file.write_text("", encoding="utf-8")
     monkeypatch.setenv("APP_ENV_FILE", str(empty_env_file))
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "webhook-jobs.sqlite3"))
-    monkeypatch.setenv("WORKER_DATABASE_PATH", str(tmp_path / "webhook-jobs.sqlite3"))
     monkeypatch.delenv("GITLAB_WEBHOOK_SIGNING_TOKEN", raising=False)
     monkeypatch.delenv("GITLAB_WEBHOOK_SECRET", raising=False)
-    mr_processor.EVENT_STATES.clear()
     yield
-    mr_processor.EVENT_STATES.clear()
 
 
 def _make_signature(signing_token: str, webhook_id: str, timestamp: str, raw_body: bytes) -> str:
@@ -305,21 +302,11 @@ def test_duplicate_webhook_id_rejected(monkeypatch):
     timestamp = str(int(time.time()))
     signature = _make_signature(signing_token, webhook_id, timestamp, raw_body)
 
-    mr_processor.EVENT_STATES[webhook_id] = "pending"
-    try:
-        response = client.post(
-            "/webhook/gitlab",
-            content=raw_body,
-            headers={
-                "webhook-id": webhook_id,
-                "webhook-timestamp": timestamp,
-                "webhook-signature": signature,
-            },
-        )
-        assert response.status_code == 200
-        assert response.json()["status"] == "duplicate"
-    finally:
-        mr_processor.EVENT_STATES.pop(webhook_id, None)
+    headers = {"webhook-id": webhook_id, "webhook-timestamp": timestamp, "webhook-signature": signature}
+    assert client.post("/webhook/gitlab", content=raw_body, headers=headers).json()["status"] == "accepted"
+    response = client.post("/webhook/gitlab", content=raw_body, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["status"] == "duplicate"
 
 
 def test_background_failure_after_valid_signature_is_logged(monkeypatch):
@@ -385,15 +372,16 @@ def test_ai_user_webhook_is_skipped_before_background_processing(monkeypatch):
 
 def test_completed_webhook_id_is_not_processed_again(monkeypatch):
     monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "legacy-secret")
-    mr_processor.EVENT_STATES["evt_completed"] = "completed"
+    headers = {"X-Gitlab-Token": "legacy-secret", "X-Gitlab-Event-UUID": "evt_completed"}
+    payload = {
+        "object_kind": "merge_request",
+        "object_attributes": {"iid": 12, "action": "open"},
+        "project": {"id": 1},
+    }
+    assert client.post("/webhook/gitlab", json=payload, headers=headers).json()["status"] == "accepted"
     response = client.post(
         "/webhook/gitlab",
-        json={
-            "object_kind": "merge_request",
-            "object_attributes": {"iid": 12, "action": "open"},
-            "project": {"id": 1},
-        },
-        headers={"X-Gitlab-Token": "legacy-secret", "X-Gitlab-Event-UUID": "evt_completed"},
+        json=payload, headers=headers,
     )
 
     assert response.status_code == 200

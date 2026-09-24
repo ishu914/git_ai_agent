@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 from fastapi import FastAPI, Response, status
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -29,6 +30,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.include_router(webhook_router)
+    webhook_semaphore = asyncio.Semaphore(settings.webhook_max_concurrent_requests)
 
     class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
@@ -40,6 +42,15 @@ def create_app() -> FastAPI:
             return response
 
     app.add_middleware(SecurityHeadersMiddleware)
+
+    class WebhookConcurrencyMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next):
+            if request.url.path != "/webhook/gitlab":
+                return await call_next(request)
+            async with webhook_semaphore:
+                return await call_next(request)
+
+    app.add_middleware(WebhookConcurrencyMiddleware)
 
     @app.get("/health")
     async def health() -> dict:

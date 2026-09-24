@@ -7,11 +7,10 @@ from app.ai.orchestrator import AIOrchestrator
 from app.config import get_settings
 from app.gitlab.client import GitLabClient
 from app.observability import log_event
-from app.services.description_manager import build_ai_unavailable_section, replace_ai_section
+from app.services.description_manager import build_ai_unavailable_section, replace_ai_section, sanitize_gitlab_ai_text
 from app.validation.engine import ValidationEngine
 
 logger = logging.getLogger(__name__)
-EVENT_STATES: Dict[str, str] = {}
 AI_REVIEW_NOTE_MARKER = "<!-- AI_REVIEW_NOTE -->"
 
 
@@ -33,37 +32,6 @@ def _file_statistics(item: Dict[str, Any]) -> tuple[int, int]:
     additions = int(item["additions"]) if "additions" in item and item.get("additions") is not None else diff_additions
     deletions = int(item["deletions"]) if "deletions" in item and item.get("deletions") is not None else diff_deletions
     return additions, deletions
-
-
-def mark_event_pending(event_key: str) -> None:
-    EVENT_STATES[event_key] = "pending"
-
-
-def mark_event_processing(event_key: str) -> None:
-    EVENT_STATES[event_key] = "processing"
-
-
-def mark_event_completed(event_key: str) -> None:
-    EVENT_STATES[event_key] = "completed"
-
-
-def mark_event_failed(event_key: str) -> None:
-    EVENT_STATES[event_key] = "failed"
-
-
-def should_skip_duplicate(event_key: str) -> bool:
-    if EVENT_STATES.get(event_key) in {"pending", "processing", "completed"}:
-        return True
-    try:
-        from app.events.store import EventStore
-        from app.config import get_settings
-        store = EventStore(get_settings().database_path)
-        evt = store.get_by_dedupe_key(event_key)
-        if evt and evt.status in {"pending", "processing", "completed", "PENDING", "PROCESSING", "COMPLETED"}:
-            return True
-    except Exception:
-        pass
-    return False
 
 
 def build_mr_context(project_id: str, mr_iid: int, client: GitLabClient) -> Dict[str, Any]:
@@ -131,7 +99,7 @@ def _publish_ai_review(client: GitLabClient, project_id: str, mr_iid: int, revie
         logger.warning("AI code review unavailable; no GitLab note created for %s/%s", project_id, mr_iid)
         return
 
-    body = _format_ai_review_note(review)
+    body = sanitize_gitlab_ai_text(_format_ai_review_note(review))
     existing_notes = client.get_merge_request_notes(project_id, mr_iid)
     existing_note = next(
         (note for note in existing_notes if AI_REVIEW_NOTE_MARKER in str(note.get("body", ""))),
@@ -166,7 +134,6 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
         action,
     )
 
-    mark_event_processing(dedupe_key)
     log_event("PROCESSING_STARTED", level="INFO", event_type="merge_request", result="started", project_id=project_id, mr_iid=mr_iid, webhook_id=event_id)
 
     settings = get_settings()
@@ -228,7 +195,7 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
             )
     else:
         description_content = build_ai_unavailable_section(ai_orchestrator.last_failure_reason, validation)
-    updated_description = replace_ai_section(description, description_content)
+    updated_description = replace_ai_section(description, sanitize_gitlab_ai_text(description_content))
     if updated_description != description:
         client.update_merge_request_description(project_id, mr_iid, updated_description)
         log_event("DESCRIPTION_UPDATE", level="INFO", event_type="merge_request", result="completed", project_id=project_id, mr_iid=mr_iid, webhook_id=event_id)
@@ -246,6 +213,5 @@ async def process_gitlab_event(event_data: Dict[str, Any]) -> Dict[str, Any]:
         "summary_status": "available" if ai_summary else "unavailable",
         "review": ai_review,
     }
-    mark_event_completed(dedupe_key)
     log_event("PROCESSING_COMPLETED", level="INFO", event_type="merge_request", result="completed", project_id=project_id, mr_iid=mr_iid, webhook_id=event_id)
     return status

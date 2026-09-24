@@ -3,7 +3,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 import pytest
 
-from app.events.store import EventRecord, EventStore, iso, utc_now
+from app.events.store import EventRecord, EventStore, QueueFullError, iso, utc_now
 from app.events.errors import classify_error, sanitize_error_message
 
 
@@ -60,6 +60,17 @@ def test_deduplication_prevents_duplicate_work(tmp_path):
     assert created1 is True
     assert created2 is False
     assert event1.event_id == event2.event_id
+
+
+def test_queue_depth_cap_rejects_new_event_but_keeps_duplicate_idempotent(tmp_path):
+    store = EventStore(str(tmp_path / "events.sqlite3"))
+    event, created = store.enqueue("wh-cap-1", "10", "group/repo", 5, "open", "hook", {}, max_pending=1)
+    assert created is True
+    duplicate, duplicate_created = store.enqueue("wh-cap-1", "10", "group/repo", 5, "open", "hook", {}, max_pending=1)
+    assert duplicate_created is False
+    assert duplicate.event_id == event.event_id
+    with pytest.raises(QueueFullError):
+        store.enqueue("wh-cap-2", "10", "group/repo", 6, "open", "hook", {}, max_pending=1)
 
 
 def test_secrets_are_redacted_from_stored_payload(tmp_path):

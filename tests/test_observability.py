@@ -32,6 +32,23 @@ def test_log_event_has_structure_and_no_sensitive_keys(caplog):
     assert "token" in message
 
 
+def test_log_event_redacts_credential_values_in_fields_and_error_text(caplog):
+    secrets = {
+        "Authorization": "Bearer synthetic-authorisation-value",
+        "gitlab_token": "glpat-synthetic-token-value",
+        "webhook_secret": "synthetic-webhook-secret",
+        "openrouter_api_key": "sk-synthetic-provider-key",
+    }
+    with caplog.at_level("INFO"):
+        log_event("SYNTHETIC_FAILURE", **secrets, error="Authorization: Bearer synthetic-authorisation-value")
+
+    output = "\n".join(record.message for record in caplog.records)
+    for value in secrets.values():
+        assert value not in output
+    assert "synthetic-authorisation-value" not in output
+    assert "[REDACTED]" in output
+
+
 def test_metric_snapshot_uses_bounded_labels_only():
     record_metric("provider_requests_total")
     record_metric("provider_requests_total")

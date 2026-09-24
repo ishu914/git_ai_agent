@@ -16,6 +16,10 @@ from app.observability import record_metric, set_gauge
 logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 3
 
+
+class QueueFullError(RuntimeError):
+    """Raised when accepting another queued event would exceed the backlog cap."""
+
 JOB_COLUMNS = (
     "job_id, webhook_id, project_id, project_path, mr_iid, action, event_type, payload, "
     "received_at, status, attempt_count, created_at, started_at, completed_at, "
@@ -156,6 +160,7 @@ class EventStore:
         event_type: str = "merge_request",
         payload: Optional[Dict[str, Any]] = None,
         dedupe_key: Optional[str] = None,
+        max_pending: Optional[int] = None,
     ) -> Tuple[EventRecord, bool]:
         """Atomically persist event before acknowledging webhook."""
         key = dedupe_key or webhook_id or str(uuid.uuid4())
@@ -174,6 +179,14 @@ class EventStore:
             if existing:
                 connection.execute("COMMIT")
                 return self._row_to_event(existing), False
+
+            if max_pending is not None:
+                queued = connection.execute(
+                    "SELECT COUNT(*) FROM jobs WHERE status IN ('PENDING', 'RETRY_WAIT', 'pending', 'retry')"
+                ).fetchone()[0]
+                if int(queued) >= max_pending:
+                    connection.execute("ROLLBACK")
+                    raise QueueFullError(f"Durable event queue reached its configured limit ({max_pending})")
 
             # Mark older pending/retry work for the same MR as obsolete
             connection.execute(

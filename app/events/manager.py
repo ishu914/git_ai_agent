@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, Optional, Set
 
 from app.config import Settings, get_settings
@@ -27,6 +28,12 @@ class InProcessEventManager:
         self._shutting_down = False
         self._notify_event = asyncio.Event()
         self._dispatcher_task: Optional[asyncio.Task] = None
+        # Only MR jobs use this executor. Its bound matches the dispatcher
+        # limit, so queued webhook requests cannot exhaust processing threads.
+        self._processor_executor = ThreadPoolExecutor(
+            max_workers=self.settings.max_concurrent_mr_jobs,
+            thread_name_prefix="mr-processor",
+        )
 
     async def start(self) -> None:
         """Start the in-process event manager: recover stale events and start dispatcher loop."""
@@ -96,8 +103,12 @@ class InProcessEventManager:
                 payload["_dedupe_key"] = event.dedupe_key
                 payload["webhook_id"] = event.dedupe_key
 
-                # Execute MR processing
-                await mr_processor.process_gitlab_event(payload)
+                # The current GitLab and provider clients are synchronous. Run
+                # the complete legacy processing stack outside FastAPI's event
+                # loop until their public interfaces can be migrated to async.
+                # This dispatcher remains the sole invocation path.
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(self._processor_executor, _run_processor, payload)
 
                 # Mark completed in durable event store
                 self.store.complete(event.event_id)
@@ -186,6 +197,7 @@ class InProcessEventManager:
                 for task in active:
                     if not task.done():
                         task.cancel()
+        self._processor_executor.shutdown(wait=False, cancel_futures=True)
 
 
 def get_event_manager() -> InProcessEventManager:
@@ -198,3 +210,8 @@ def get_event_manager() -> InProcessEventManager:
 def set_event_manager(manager: Optional[InProcessEventManager]) -> None:
     global _global_event_manager
     _global_event_manager = manager
+
+
+def _run_processor(payload: Dict[str, Any]) -> Any:
+    """Run the async processor in a dedicated worker thread."""
+    return asyncio.run(mr_processor.process_gitlab_event(payload))

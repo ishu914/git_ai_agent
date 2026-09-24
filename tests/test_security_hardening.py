@@ -8,7 +8,7 @@ from app.ai.code_reviewer import normalize_review_result
 from app.ai.prompts import build_messages_for_review
 from app.ai.token_budget import build_compact_review_payload, redact_sensitive_text
 from app.gitlab.client import GitLabClient
-from app.worker.store import JobStore
+from app.events.store import EventStore as JobStore
 from app.main import app
 
 

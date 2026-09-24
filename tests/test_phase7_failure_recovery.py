@@ -1,6 +1,6 @@
 from datetime import timedelta
 
-from app.worker.store import JobStore, iso, utc_now
+from app.events.store import EventStore as JobStore, iso, utc_now
 
 
 def payload(webhook_id="evt-1", action="open", mr_iid=2):

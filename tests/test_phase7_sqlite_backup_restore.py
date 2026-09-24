@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from app.worker.store import JobStore, SCHEMA_VERSION, iso, utc_now
+from app.events.store import EventStore as JobStore, SCHEMA_VERSION, iso, utc_now
 
 
 def make_payload(webhook_id: str = "evt-1", mr_iid: int = 2, action: str = "open"):
@@ -59,7 +59,7 @@ def test_transaction_failure_rolls_back_without_partial_commit(tmp_path, monkeyp
                 raise RuntimeError("forced rollback")
             return self._inner.execute(sql, *params)
 
-    monkeypatch.setattr("app.worker.store.sqlite3.connect", lambda *args, **kwargs: ExplodingConnection(*args, **kwargs))
+    monkeypatch.setattr("app.events.store.sqlite3.connect", lambda *args, **kwargs: ExplodingConnection(*args, **kwargs))
 
     with pytest.raises(RuntimeError, match="forced rollback"):
         store.enqueue("evt-fail", "4", "group/project", 7, "open", "hook", make_payload("evt-fail", 7))

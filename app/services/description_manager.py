@@ -1,8 +1,18 @@
+import re
 from typing import Any, Dict
 
 
 AI_SECTION_START = "<!-- AI_REVIEW_START -->"
 AI_SECTION_END = "<!-- AI_REVIEW_END -->"
+
+
+def sanitize_gitlab_ai_text(text: str) -> str:
+    """Neutralize GitLab quick actions in all AI-authored GitLab content.
+
+    A backslash keeps the command readable in Markdown while ensuring no line
+    submitted to GitLab starts with a quick-action slash.
+    """
+    return re.sub(r"^(\s*)/([A-Za-z][A-Za-z0-9_-]*\b)", r"\1\\/\2", str(text), flags=re.MULTILINE)
 
 
 def _as_text(value: Any, default: str = "") -> str:

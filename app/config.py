@@ -47,9 +47,9 @@ class Settings(BaseSettings):
     max_concurrent_mr_jobs: int = Field(default=2, ge=1, le=32, alias="MAX_CONCURRENT_MR_JOBS")
 
     database_path: str = Field(default="data/events.sqlite3", alias="DATABASE_PATH")
-    worker_database_path: str = Field(default="data/events.sqlite3", alias="WORKER_DATABASE_PATH")
     webhook_max_body_bytes: int = Field(default=1048576, alias="WEBHOOK_MAX_BODY_BYTES")
     webhook_max_concurrent_requests: int = Field(default=10, alias="WEBHOOK_MAX_CONCURRENT_REQUESTS")
+    event_max_queue_depth: int = Field(default=1000, ge=1, alias="EVENT_MAX_QUEUE_DEPTH")
     stale_processing_timeout_seconds: int = Field(default=300, alias="STALE_PROCESSING_TIMEOUT_SECONDS")
     event_max_attempts: int = Field(default=3, alias="EVENT_MAX_ATTEMPTS")
     event_retry_backoff_base_seconds: int = Field(default=5, alias="EVENT_RETRY_BACKOFF_BASE_SECONDS")

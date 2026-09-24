@@ -14,18 +14,15 @@ def phase9_client(monkeypatch, tmp_path):
 
     monkeypatch.setenv("APP_ENV_FILE", str(empty_env))
     monkeypatch.setenv("DATABASE_PATH", db_path)
-    monkeypatch.setenv("WORKER_DATABASE_PATH", db_path)
     monkeypatch.setenv("WEBHOOK_MAX_BODY_BYTES", "1000")  # Small limit for testing
     monkeypatch.setenv("GITLAB_TOKEN", "mock-gitlab-token")
     monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "supersecret")
     monkeypatch.setenv("OPENROUTER_API_KEY", "mock-openrouter-key")
     monkeypatch.delenv("GITLAB_WEBHOOK_SIGNING_TOKEN", raising=False)
 
-    mr_processor.EVENT_STATES.clear()
     app = create_app()
     with TestClient(app) as test_client:
         yield test_client
-    mr_processor.EVENT_STATES.clear()
 
 
 def test_webhook_request_body_size_limit_rejection(phase9_client):

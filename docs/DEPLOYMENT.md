@@ -100,7 +100,8 @@ When systemd sends `SIGTERM`:
 2. **Webhook Authentication**:
    - Standard Webhook signing tokens (`GITLAB_WEBHOOK_SIGNING_TOKEN=whsec_...` using HMAC-SHA256).
    - Legacy secret token (`GITLAB_WEBHOOK_SECRET=...` using constant-time `hmac.compare_digest`).
-3. **Concurrency Control**: `MAX_CONCURRENT_MR_JOBS=2` limits concurrent AI review processing tasks in-process without blocking `/health`, `/ready`, or `/metrics`.
+3. **Concurrency Control**: `WEBHOOK_MAX_CONCURRENT_REQUESTS=10` bounds concurrent webhook request handling. `MAX_CONCURRENT_MR_JOBS=2` bounds dispatcher jobs. Processing runs outside the FastAPI event loop, so `/health`, `/ready`, and `/metrics` remain responsive while GitLab or AI operations are slow.
+4. **Queue Backpressure**: `EVENT_MAX_QUEUE_DEPTH=1000` limits pending and retrying durable events. Once full, new unique deliveries receive HTTP 429; duplicate deliveries still receive their normal idempotent response.
 
 ---
 
@@ -126,8 +127,15 @@ ai:
 
 ## 7. Secret Rotation Procedures
 
+### GitLab service account and PAT
+The API endpoints used by this service read projects, merge requests, diffs, commits, approvals and files; they update an MR description and create or update MR notes. A classic PAT requires the `api` scope for these write endpoints; token scope is separate from project membership.
+
+On the current GitLab roles matrix, **Developer is the minimum built-in project role that can update merge-request details**, while comments can be added by lower roles. Developer is therefore required by the current description-update design. This role can also receive merge capability depending on protected-branch configuration, and GitLab's built-in roles do not provide a role that both updates MR details and categorically lacks all approval/merge-related ability. Do not represent this account as least-privilege if that capability is unacceptable.
+
+Restrict the service account to only reviewed projects, protect every target branch with **Allowed to merge: Maintainers only** and **Allowed to push and merge: No one**, and use a dedicated account with no Maintainer/Owner membership. The application contains no approve, merge, close, assign, label, commit, or branch mutation endpoint. GitLab does not expose a stable REST startup check proving all effective merge or approval permissions, because they depend on branch protection and project policy; validate those controls with a non-production MR after configuring the target GitLab instance.
+
 ### Rotating GitLab PAT
-1. Generate new Personal Access Token in GitLab (`api` scope).
+1. Generate a new Personal Access Token with the `api` scope for the restricted service account.
 2. Update `/etc/git-ai-reviewer/agent.env`:
    `GITLAB_TOKEN=glpat-newtoken...`
 3. Restart service: `sudo systemctl restart git-ai-agent`

@@ -1,10 +1,15 @@
 import time
+import re
+import asyncio
+import threading
 
 from fastapi.testclient import TestClient
 import pytest
 
-from app.main import app
+from app.main import app, create_app
+from app.events.manager import set_event_manager
 from app.services import mr_processor
+from app.services.description_manager import sanitize_gitlab_ai_text
 
 
 client = TestClient(app)
@@ -16,12 +21,13 @@ def isolate_webhook_environment(monkeypatch, tmp_path):
     empty_env_file.write_text("", encoding="utf-8")
     monkeypatch.setenv("APP_ENV_FILE", str(empty_env_file))
     monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "webhook-jobs.sqlite3"))
-    monkeypatch.setenv("WORKER_DATABASE_PATH", str(tmp_path / "webhook-jobs.sqlite3"))
     monkeypatch.delenv("GITLAB_WEBHOOK_SIGNING_TOKEN", raising=False)
     monkeypatch.delenv("GITLAB_WEBHOOK_SECRET", raising=False)
-    mr_processor.EVENT_STATES.clear()
+    monkeypatch.setenv("GITLAB_TOKEN", "test-gitlab-token")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    set_event_manager(None)
     yield
-    mr_processor.EVENT_STATES.clear()
+    set_event_manager(None)
 
 
 def test_missing_webhook_token(monkeypatch):
@@ -96,7 +102,7 @@ def test_missing_mr_iid(monkeypatch):
     assert response.status_code == 400
 
 
-def test_valid_mr_webhook_processes_in_process(monkeypatch):
+def test_valid_mr_webhook_processes_once_through_dispatcher(monkeypatch):
     monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "supersecret")
     called = {"count": 0}
 
@@ -105,32 +111,118 @@ def test_valid_mr_webhook_processes_in_process(monkeypatch):
         return {"status": "accepted"}
 
     monkeypatch.setattr(mr_processor, "process_gitlab_event", fake_process)
-    response = client.post(
-        "/webhook/gitlab",
-        json={"object_kind": "merge_request", "object_attributes": {"iid": 12, "action": "open"}, "project": {"id": 1}},
-        headers={"X-Gitlab-Token": "supersecret", "X-Gitlab-Event": "Merge Request Hook"},
-    )
-    assert response.status_code == 200
-    assert response.json()["status"] == "accepted"
-    for _ in range(25):
-        if called["count"] >= 1:
-            break
-        time.sleep(0.05)
+    with TestClient(create_app()) as running_client:
+        response = running_client.post(
+            "/webhook/gitlab",
+            json={"object_kind": "merge_request", "object_attributes": {"iid": 12, "action": "open"}, "project": {"id": 1}},
+            headers={"X-Gitlab-Token": "supersecret", "X-Gitlab-Event": "Merge Request Hook"},
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "accepted"
+        for _ in range(25):
+            if called["count"] >= 1:
+                break
+            time.sleep(0.05)
     assert called["count"] == 1
 
 
 def test_duplicate_event_not_queued_twice(monkeypatch):
     monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "supersecret")
-    event_key = "1:12:open"
-    mr_processor.EVENT_STATES[event_key] = "pending"
-    response = client.post(
+    payload = {"object_kind": "merge_request", "object_attributes": {"iid": 12, "action": "open"}, "project": {"id": 1}}
+    headers = {"X-Gitlab-Token": "supersecret", "X-Gitlab-Event": "Merge Request Hook"}
+    first = client.post(
         "/webhook/gitlab",
-        json={"object_kind": "merge_request", "object_attributes": {"iid": 12, "action": "open"}, "project": {"id": 1}},
-        headers={"X-Gitlab-Token": "supersecret", "X-Gitlab-Event": "Merge Request Hook"},
+        json=payload, headers=headers,
     )
-    assert response.status_code == 200
-    assert response.json()["status"] == "duplicate"
-    mr_processor.EVENT_STATES.pop(event_key, None)
+    second = client.post("/webhook/gitlab", json=payload, headers=headers)
+    assert first.json()["status"] == "accepted"
+    assert second.json()["status"] == "duplicate"
+
+
+def test_webhook_rejects_new_delivery_when_durable_queue_is_full(monkeypatch):
+    monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "supersecret")
+    monkeypatch.setenv("EVENT_MAX_QUEUE_DEPTH", "1")
+    headers = {"X-Gitlab-Token": "supersecret"}
+    first = {"object_kind": "merge_request", "project": {"id": 1}, "object_attributes": {"iid": 1, "action": "open"}}
+    second = {"object_kind": "merge_request", "project": {"id": 1}, "object_attributes": {"iid": 2, "action": "open"}}
+    assert client.post("/webhook/gitlab", json=first, headers=headers).json()["status"] == "accepted"
+    response = client.post("/webhook/gitlab", json=second, headers=headers)
+    assert response.status_code == 429
+    assert response.json()["detail"] == "Event queue is at capacity"
+
+
+def test_payload_hash_deduplicates_retries_but_accepts_distinct_updates(monkeypatch):
+    monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "supersecret")
+    processed = []
+
+    async def fake_process(event):
+        processed.append(event["object_attributes"]["updated_at"])
+        return {}
+
+    monkeypatch.setattr(mr_processor, "process_gitlab_event", fake_process)
+    headers = {"X-Gitlab-Token": "supersecret"}
+    first = {"object_kind": "merge_request", "project": {"id": 3}, "changes": {"diffs": {"old": "base"}}, "object_attributes": {"iid": 4, "action": "update", "updated_at": "2026-01-01T00:00:00Z"}}
+    second = {"object_kind": "merge_request", "project": {"id": 3}, "changes": {"diffs": {"new": "changed"}}, "object_attributes": {"iid": 4, "action": "update", "updated_at": "2026-01-01T00:01:00Z"}}
+    with TestClient(create_app()) as running_client:
+        assert running_client.post("/webhook/gitlab", json=first, headers=headers).json()["status"] == "accepted"
+        assert running_client.post("/webhook/gitlab", json=second, headers=headers).json()["status"] == "accepted"
+        assert running_client.post("/webhook/gitlab", json=first, headers=headers).json()["status"] == "duplicate"
+        for _ in range(25):
+            if len(processed) == 2:
+                break
+            time.sleep(0.05)
+    assert sorted(processed) == ["2026-01-01T00:00:00Z", "2026-01-01T00:01:00Z"]
+
+
+def test_ai_gitlab_writes_neutralize_quick_actions():
+    malicious = "/approve\n/merge\n/close\n/assign @user\nordinary /merge text"
+    sanitized = sanitize_gitlab_ai_text(malicious)
+    assert not re.search(r"^\s*/(?:approve|merge|close|assign)\b", sanitized, flags=re.MULTILINE)
+    assert "ordinary /merge text" in sanitized
+
+    writes = []
+
+    class FakeClient:
+        def get_merge_request_notes(self, *_):
+            return []
+
+        def create_merge_request_note(self, _, __, body):
+            writes.append(body)
+
+    mr_processor._publish_ai_review(
+        FakeClient(), "project", 1,
+        {"status": "reviewed", "summary": malicious, "findings": []},
+    )
+    # The same central function protects review notes and description sections.
+    writes.append(sanitize_gitlab_ai_text(malicious))
+    assert all(not re.search(r"^\s*/(?:approve|merge|close|assign)\b", body, flags=re.MULTILINE) for body in writes)
+
+
+def test_health_remains_responsive_while_dispatcher_processes_slow_event(monkeypatch):
+    monkeypatch.setenv("GITLAB_WEBHOOK_SECRET", "supersecret")
+    started = threading.Event()
+    release = threading.Event()
+
+    async def slow_process(_event):
+        started.set()
+        await asyncio.to_thread(release.wait, 3)
+        return {}
+
+    monkeypatch.setattr(mr_processor, "process_gitlab_event", slow_process)
+    with TestClient(create_app()) as running_client:
+        response = running_client.post(
+            "/webhook/gitlab",
+            json={"object_kind": "merge_request", "project": {"id": 8}, "object_attributes": {"iid": 9, "action": "open"}},
+            headers={"X-Gitlab-Token": "supersecret"},
+        )
+        assert response.status_code == 200
+        assert started.wait(1), "slow processing did not start"
+        started_at = time.monotonic()
+        health = running_client.get("/health")
+        elapsed = time.monotonic() - started_at
+        release.set()
+    assert health.status_code == 200
+    assert elapsed < 1
 
 
 def test_background_failure_is_logged_and_does_not_crash_app(monkeypatch):
@@ -140,11 +232,12 @@ def test_background_failure_is_logged_and_does_not_crash_app(monkeypatch):
         raise RuntimeError("background failure")
 
     monkeypatch.setattr(mr_processor, "process_gitlab_event", boom)
-    response = client.post(
+    with TestClient(create_app()) as running_client:
+        response = running_client.post(
         "/webhook/gitlab",
         json={"object_kind": "merge_request", "object_attributes": {"iid": 12, "action": "open"}, "project": {"id": 1}},
         headers={"X-Gitlab-Token": "supersecret", "X-Gitlab-Event": "Merge Request Hook"},
-    )
+        )
     assert response.status_code == 200
     assert response.json()["status"] == "accepted"
 
@@ -201,7 +294,7 @@ def test_single_process_e2e_updates_description_and_review_note(monkeypatch):
             calls.append(("ai_analyze", project_id, mr_iid, validation["status"]))
             return {
                 "status": "reviewed",
-                "summary": "The change is safe.",
+                "summary": "The change is safe.\n/approve\n/merge\n/close\n/assign @user",
                 "change_type": "maintenance",
                 "testing": "Not run",
                 "risk": "low",
@@ -211,24 +304,26 @@ def test_single_process_e2e_updates_description_and_review_note(monkeypatch):
 
     monkeypatch.setattr(mr_processor, "GitLabClient", FakeGitLabClient)
     monkeypatch.setattr(mr_processor, "AIOrchestrator", FakeAIOrchestrator)
-    response = client.post(
-        "/webhook/gitlab",
-        json={"object_kind": "merge_request", "object_attributes": {"iid": 42, "action": "open"}, "project": {"id": 7}},
-        headers={"X-Gitlab-Token": "supersecret", "X-Gitlab-Event": "Merge Request Hook", "webhook-id": "e2e-42"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "accepted"
-    for _ in range(25):
-        if any(call[0] == "create_note" for call in calls):
-            break
-        time.sleep(0.05)
+    with TestClient(create_app()) as running_client:
+        response = running_client.post(
+            "/webhook/gitlab",
+            json={"object_kind": "merge_request", "object_attributes": {"iid": 42, "action": "open"}, "project": {"id": 7}},
+            headers={"X-Gitlab-Token": "supersecret", "X-Gitlab-Event": "Merge Request Hook", "webhook-id": "e2e-42"},
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "accepted"
+        for _ in range(25):
+            if any(call[0] == "create_note" for call in calls):
+                break
+            time.sleep(0.05)
 
     updated = next(call[3] for call in calls if call[0] == "update_description")
     note = next(call[3] for call in calls if call[0] == "create_note")
     assert "Developer-authored text" in updated
     assert "The change is safe." in updated
     assert "AI_REVIEW_NOTE" in note
+    assert not re.search(r"^\s*/(?:approve|merge|close|assign)\b", updated, flags=re.MULTILINE)
+    assert not re.search(r"^\s*/(?:approve|merge|close|assign)\b", note, flags=re.MULTILINE)
     assert any(call[0] == "ai_analyze" for call in calls)
     assert not any(call[0] in {"approve", "merge", "push", "update_branch", "change_permissions"} for call in calls)
 
@@ -244,25 +339,26 @@ def test_failed_in_process_task_does_not_block_another_webhook(monkeypatch):
             raise RuntimeError("expected isolated failure")
 
     monkeypatch.setattr(mr_processor, "process_gitlab_event", process)
-    first = client.post(
-        "/webhook/gitlab",
-        json={"object_kind": "merge_request", "object_attributes": {"iid": 1, "action": "open"}, "project": {"id": 9}},
-        headers={"X-Gitlab-Token": "supersecret", "webhook-id": "failure-1"},
-    )
-    assert first.status_code == 200
-    for _ in range(25):
-        if processed == [1]:
-            break
-        time.sleep(0.05)
+    with TestClient(create_app()) as running_client:
+        first = running_client.post(
+            "/webhook/gitlab",
+            json={"object_kind": "merge_request", "object_attributes": {"iid": 1, "action": "open"}, "project": {"id": 9}},
+            headers={"X-Gitlab-Token": "supersecret", "webhook-id": "failure-1"},
+        )
+        assert first.status_code == 200
+        for _ in range(25):
+            if processed == [1]:
+                break
+            time.sleep(0.05)
 
-    second = client.post(
-        "/webhook/gitlab",
-        json={"object_kind": "merge_request", "object_attributes": {"iid": 2, "action": "open"}, "project": {"id": 9}},
-        headers={"X-Gitlab-Token": "supersecret", "webhook-id": "success-2"},
-    )
-    assert second.status_code == 200
-    for _ in range(25):
-        if processed == [1, 2]:
-            break
-        time.sleep(0.05)
+        second = running_client.post(
+            "/webhook/gitlab",
+            json={"object_kind": "merge_request", "object_attributes": {"iid": 2, "action": "open"}, "project": {"id": 9}},
+            headers={"X-Gitlab-Token": "supersecret", "webhook-id": "success-2"},
+        )
+        assert second.status_code == 200
+        for _ in range(25):
+            if processed == [1, 2]:
+                break
+            time.sleep(0.05)
     assert processed == [1, 2]

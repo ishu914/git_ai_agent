@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import binascii
 import hashlib
@@ -123,35 +122,6 @@ def _is_relevant_mr_event(event_data: Dict[str, Any], action: str) -> bool:
     )
 
 
-async def _run_in_process_mr_processing(event_data: Dict[str, Any]) -> None:
-    dedupe_key = event_data.get("_dedupe_key") or event_data.get("webhook_id") or "background"
-    try:
-        await mr_processor.process_gitlab_event(event_data)
-        try:
-            from app.events.store import EventStore
-            from app.config import get_settings
-            store = EventStore(get_settings().database_path)
-            evt = store.get_by_dedupe_key(dedupe_key)
-            if evt:
-                store.complete(evt.event_id)
-        except Exception:
-            pass
-    except Exception as exc:
-        event_key = dedupe_key
-        mr_processor.mark_event_failed(event_key)
-        log_event("PROCESSING_FAILED", level="ERROR", event_type="merge_request", result="failed", webhook_id=event_data.get("webhook_id"))
-        logger.exception("In-process MR processing failed safely")
-        try:
-            from app.events.store import EventStore
-            from app.config import get_settings
-            store = EventStore(get_settings().database_path)
-            evt = store.get_by_dedupe_key(dedupe_key)
-            if evt:
-                store.fail(evt.event_id, exc)
-        except Exception:
-            pass
-
-
 @router.post("/webhook/gitlab")
 async def gitlab_webhook(request: Request) -> Dict[str, Any]:
     settings = get_settings()
@@ -272,37 +242,35 @@ async def gitlab_webhook(request: Request) -> Dict[str, Any]:
 
     project_id = mr_event["project_id"]
     mr_iid = mr_event["mr_iid"]
-    dedupe_key = (
-        request.headers.get("webhook-id")
-        or request.headers.get("X-Gitlab-Event-UUID")
-        or f"{project_id}:{mr_iid}:{mr_event['action']}"
-    )
-
-    if mr_processor.should_skip_duplicate(dedupe_key):
-        record_metric("webhook_duplicate_total")
-        log_event("WEBHOOK_DUPLICATE", level="INFO", event_type="merge_request", result="duplicate", project_id=str(project_id), mr_iid=mr_iid, webhook_id=dedupe_key)
-        logger.info("GitLab MR event is already queued or processing: %s", dedupe_key)
-        return {"status": "duplicate", "event": event_name}
+    delivery_id = request.headers.get("webhook-id") or request.headers.get("X-Gitlab-Event-UUID")
+    # GitLab does not always supply a delivery identifier.  The raw payload is
+    # the stable delivery identity in that case: identical retries deduplicate,
+    # while a changed MR update receives its own durable event.
+    dedupe_key = delivery_id or f"payload-sha256:{hashlib.sha256(raw_body).hexdigest()}"
 
     event_data["webhook_id"] = dedupe_key
     event_data["_dedupe_key"] = dedupe_key
-    mr_processor.mark_event_pending(dedupe_key)
-
     # Durable Event Store Persistence INSIDE the application
-    from app.events.store import EventStore
+    from app.events.store import EventStore, QueueFullError
     from app.events.manager import get_event_manager
 
     store = EventStore(settings.database_path)
     proj_path = (event_data.get("project") or {}).get("path_with_namespace")
-    event_rec, created = store.enqueue(
-        dedupe_key=dedupe_key,
-        project_id=str(project_id),
-        project_path=proj_path,
-        mr_iid=mr_iid,
-        action=str(mr_event["action"]),
-        event_type=event_name,
-        payload=event_data,
-    )
+    try:
+        event_rec, created = store.enqueue(
+            dedupe_key=dedupe_key,
+            project_id=str(project_id),
+            project_path=proj_path,
+            mr_iid=mr_iid,
+            action=str(mr_event["action"]),
+            event_type=event_name,
+            payload=event_data,
+            max_pending=settings.event_max_queue_depth,
+        )
+    except QueueFullError:
+        record_metric("webhook_rejected_total")
+        log_event("WEBHOOK_REJECTED", level="WARNING", event_type="merge_request", result="rejected", project_id=str(project_id), mr_iid=mr_iid, error_category="capacity", reason="queue_full")
+        raise HTTPException(status_code=429, detail="Event queue is at capacity")
 
     if not created:
         record_metric("webhook_duplicate_total")
@@ -337,8 +305,7 @@ async def gitlab_webhook(request: Request) -> Dict[str, Any]:
         actor_username,
     )
 
-    # Schedule immediate in-process task and notify manager
-    asyncio.create_task(_run_in_process_mr_processing(event_data))
+    # The durable dispatcher is the only path that may invoke MR processing.
     get_event_manager().notify_new_event()
 
     return {"status": "accepted", "event": event_name, "processing": "in_process", "webhook_id": dedupe_key}
